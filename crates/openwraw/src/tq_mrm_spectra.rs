@@ -87,6 +87,32 @@ fn summarize(
     )
 }
 
+fn sorted_group_arrays(
+    function: &TqMrmFunctionEntry,
+    values: &[f32],
+    group: &TransitionGroup,
+) -> (Vec<f64>, Vec<f32>) {
+    let mut pairs: Vec<(f64, f32)> = group
+        .transition_indices
+        .iter()
+        .map(|&transition_index| {
+            (
+                function.transitions[transition_index].product_mz,
+                values[transition_index],
+            )
+        })
+        .collect();
+
+    // OpenMassSpec's spectrum conformance contract requires ascending m/z.
+    // MRM transition order is method-defined and therefore cannot be assumed
+    // to be sorted by Q3. Sort pairs together so signal stays attached to Q3.
+    pairs.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    pairs.into_iter().unzip()
+}
+
 fn function_pseudo_ms2(
     function: &TqMrmFunctionEntry,
     index_offset: usize,
@@ -114,13 +140,7 @@ fn function_pseudo_ms2(
         }
 
         for (group_index, group) in groups.iter().enumerate() {
-            let mut mz = Vec::with_capacity(group.transition_indices.len());
-            let mut intensity = Vec::with_capacity(group.transition_indices.len());
-            for &transition_index in &group.transition_indices {
-                mz.push(function.transitions[transition_index].product_mz);
-                intensity.push(values[transition_index]);
-            }
-
+            let (mz, intensity) = sorted_group_arrays(function, &values, group);
             let (tic, base_peak_mz, base_peak_intensity, low_mz, high_mz) =
                 summarize(&mz, &intensity);
             let index = index_offset + output.len();
