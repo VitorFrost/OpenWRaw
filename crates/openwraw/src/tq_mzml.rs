@@ -13,7 +13,7 @@ use std::path::Path;
 
 use openmassspec_core as msc;
 
-use crate::raw::tq::{TqPolarity, TqFunctionKind};
+use crate::raw::tq::TqPolarity;
 use crate::raw::tq_reader::{TqDecodedQ3Scan, TqReader};
 
 const SOFTWARE_NAME: &str = "openwraw";
@@ -53,7 +53,7 @@ fn instrument_cv(name: &str) -> msc::CvTerm {
         return msc::CvTerm::new("MS:1001792", "Xevo TQ-S");
     }
     if compact.starts_with("XEVOTQ") {
-        // Generic Xevo triple-quadrupole model from the older PSI-MS branch.
+        // PSI-MS MS:1001790 = Xevo TQ MS.
         return msc::CvTerm::new("MS:1001790", "Xevo TQ MS");
     }
     msc::CvTerm::new("MS:1000126", "Waters instrument model")
@@ -276,6 +276,7 @@ pub fn write_tq_q3_indexed_mzml<P: AsRef<Path>, W: Write>(
 mod tests {
     use super::*;
     use crate::raw::data::Spectrum;
+    use crate::raw::tq::TqFunctionKind;
 
     fn synthetic_scan() -> TqDecodedQ3Scan {
         TqDecodedQ3Scan {
