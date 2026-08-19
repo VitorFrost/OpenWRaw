@@ -3,6 +3,11 @@
 //! Broad Q3 scans are emitted through [`crate::tq_mzml::TqQ3Source`], while
 //! MRM functions are represented as PSI-MS selected-reaction-monitoring
 //! chromatograms (`MS:1001473`) with explicit precursor and product m/z.
+//!
+//! An optional MRM pseudo-MS2 projection can additionally place sparse
+//! Q1-grouped transition spectra into `spectrumList` for compatibility with
+//! spectrum-oriented downstream tools. Canonical SRM chromatograms remain
+//! present and authoritative in that mode.
 
 use std::io::Write;
 use std::path::Path;
@@ -11,6 +16,7 @@ use openmassspec_core as msc;
 use openmassspec_core::SpectrumSource;
 
 use crate::raw::tq_mrm::{TqMrmChromatogram, TqMrmReader};
+use crate::tq_mrm_spectra::{pseudo_ms2_records, TqMrmSpectrumMode};
 use crate::tq_mzml::{TqQ3MzmlMode, TqQ3Source};
 
 fn mrm_record(index: usize, trace: TqMrmChromatogram) -> msc::ChromatogramRecord {
@@ -35,24 +41,47 @@ fn mrm_record(index: usize, trace: TqMrmChromatogram) -> msc::ChromatogramRecord
 /// Spectrum/chromatogram source for a mixed TQ acquisition.
 pub struct TqMixedSource {
     q3: TqQ3Source,
+    mrm: TqMrmReader,
     mrm_traces: Vec<TqMrmChromatogram>,
+    mrm_spectrum_mode: TqMrmSpectrumMode,
 }
 
 impl TqMixedSource {
-    /// Open both broad-Q3 and MRM views of the same MassLynx bundle.
+    /// Open both broad-Q3 and canonical MRM views of the same MassLynx bundle.
     ///
-    /// MRM decoding errors are surfaced here rather than silently dropping
-    /// targeted channels from the resulting mzML.
+    /// This default does not add MRM-derived spectra; MRM remains solely in
+    /// canonical SRM chromatograms.
     pub fn open<P: AsRef<Path>>(dir: P, q3_mode: TqQ3MzmlMode) -> crate::Result<Self> {
+        Self::open_with_mrm_spectra(dir, q3_mode, TqMrmSpectrumMode::None)
+    }
+
+    /// Open the mixed source with an explicit optional MRM spectrum projection.
+    ///
+    /// [`TqMrmSpectrumMode::PseudoMs2`] adds sparse pseudo-MS2 spectra grouped
+    /// by Q1 while still retaining the canonical SRM chromatograms.
+    pub fn open_with_mrm_spectra<P: AsRef<Path>>(
+        dir: P,
+        q3_mode: TqQ3MzmlMode,
+        mrm_spectrum_mode: TqMrmSpectrumMode,
+    ) -> crate::Result<Self> {
         let dir = dir.as_ref();
         let q3 = TqQ3Source::open(dir, q3_mode)?;
         let mrm = TqMrmReader::open(dir)?;
         let mrm_traces = mrm.chromatograms()?;
-        Ok(Self { q3, mrm_traces })
+        Ok(Self {
+            q3,
+            mrm,
+            mrm_traces,
+            mrm_spectrum_mode,
+        })
     }
 
     pub fn q3_mode(&self) -> TqQ3MzmlMode {
         self.q3.mode()
+    }
+
+    pub fn mrm_spectrum_mode(&self) -> TqMrmSpectrumMode {
+        self.mrm_spectrum_mode
     }
 
     pub fn mrm_chromatogram_count(&self) -> usize {
@@ -66,11 +95,27 @@ impl SpectrumSource for TqMixedSource {
     }
 
     fn iter_spectra<'s>(&'s mut self) -> Box<dyn Iterator<Item = msc::SpectrumRecord> + 's> {
-        self.q3.iter_spectra()
+        match self.mrm_spectrum_mode {
+            TqMrmSpectrumMode::None => self.q3.iter_spectra(),
+            TqMrmSpectrumMode::PseudoMs2 => {
+                let q3_count = self.q3.spectrum_count_hint().unwrap_or(0);
+                // The canonical MRM decode already succeeded in `open`; if an
+                // optional compatibility projection still fails, omit only that
+                // projection rather than losing the native Q3 spectrum stream.
+                let mrm_records = pseudo_ms2_records(&self.mrm, q3_count).unwrap_or_default();
+                let q3_iter = self.q3.iter_spectra();
+                Box::new(q3_iter.chain(mrm_records))
+            }
+        }
     }
 
     fn spectrum_count_hint(&self) -> Option<usize> {
-        self.q3.spectrum_count_hint()
+        match self.mrm_spectrum_mode {
+            TqMrmSpectrumMode::None => self.q3.spectrum_count_hint(),
+            // Let the mzML writer derive/patch the final count when optional
+            // Q1 grouping can produce more than one pseudo-MS2 per cycle.
+            TqMrmSpectrumMode::PseudoMs2 => None,
+        }
     }
 
     fn iter_chromatograms<'s>(
@@ -87,16 +132,25 @@ impl SpectrumSource for TqMixedSource {
     }
 }
 
-/// Write a mixed TQ acquisition to mzML.
+/// Write a mixed TQ acquisition to mzML using canonical MRM chromatograms only.
 ///
-/// Q3 semantics are controlled explicitly by `q3_mode`; MRM data always
-/// remains canonical SRM chromatograms.
+/// Q3 semantics are controlled explicitly by `q3_mode`.
 pub fn write_tq_mixed_mzml<P: AsRef<Path>, W: Write>(
     dir: P,
     out: &mut W,
     q3_mode: TqQ3MzmlMode,
 ) -> crate::Result<()> {
-    let mut source = TqMixedSource::open(dir, q3_mode)?;
+    write_tq_mixed_mzml_with_options(dir, out, q3_mode, TqMrmSpectrumMode::None)
+}
+
+/// Write a mixed TQ acquisition with explicit Q3 and MRM spectrum projections.
+pub fn write_tq_mixed_mzml_with_options<P: AsRef<Path>, W: Write>(
+    dir: P,
+    out: &mut W,
+    q3_mode: TqQ3MzmlMode,
+    mrm_spectrum_mode: TqMrmSpectrumMode,
+) -> crate::Result<()> {
+    let mut source = TqMixedSource::open_with_mrm_spectra(dir, q3_mode, mrm_spectrum_mode)?;
     msc::write_mzml(&mut source, out).map_err(crate::Error::Io)?;
     Ok(())
 }
@@ -107,7 +161,17 @@ pub fn write_tq_mixed_indexed_mzml<P: AsRef<Path>, W: Write>(
     out: &mut W,
     q3_mode: TqQ3MzmlMode,
 ) -> crate::Result<()> {
-    let mut source = TqMixedSource::open(dir, q3_mode)?;
+    write_tq_mixed_indexed_mzml_with_options(dir, out, q3_mode, TqMrmSpectrumMode::None)
+}
+
+/// Indexed-mzML with explicit Q3 and MRM spectrum projections.
+pub fn write_tq_mixed_indexed_mzml_with_options<P: AsRef<Path>, W: Write>(
+    dir: P,
+    out: &mut W,
+    q3_mode: TqQ3MzmlMode,
+    mrm_spectrum_mode: TqMrmSpectrumMode,
+) -> crate::Result<()> {
+    let mut source = TqMixedSource::open_with_mrm_spectra(dir, q3_mode, mrm_spectrum_mode)?;
     msc::write_indexed_mzml(&mut source, out).map_err(crate::Error::Io)?;
     Ok(())
 }
