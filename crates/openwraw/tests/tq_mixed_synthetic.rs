@@ -5,7 +5,7 @@ use openwraw::raw::tq_reader::TqReader;
 use openwraw::tq_mixed_mzml::{write_tq_mixed_mzml, TqMixedSource};
 use openwraw::tq_mzml::TqQ3MzmlMode;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn temp_bundle(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("openwraw-{name}-{}", std::process::id()))
@@ -38,7 +38,7 @@ fn direct6_record(
     record
 }
 
-fn write_synthetic_mixed_bundle(dir: &PathBuf) {
+fn write_synthetic_mixed_bundle(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
 
