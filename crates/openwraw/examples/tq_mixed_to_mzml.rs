@@ -1,7 +1,11 @@
 //! Convert a mixed Waters TQ acquisition to mzML.
 //!
-//! Broad Q3 scans are written as spectra; MRM channels are written as
+//! Broad Q3 scans are written as spectra; MRM channels are always written as
 //! canonical SRM chromatograms with precursor/product m/z metadata.
+//!
+//! An optional `--mrm-pseudo-ms2` compatibility flag additionally writes
+//! sparse MRM pseudo-MS2 spectra grouped by Q1. The canonical chromatograms
+//! remain present when that flag is used.
 //!
 //! Usage:
 //!
@@ -10,7 +14,7 @@
 //!   path/to/bundle.raw out.mzML native-ms2
 //!
 //! cargo run -p openwraw --example tq_mixed_to_mzml --release -- \
-//!   path/to/bundle.raw out.mzML pseudo-ms1
+//!   path/to/bundle.raw out.mzML pseudo-ms1 --mrm-pseudo-ms2
 //! ```
 //!
 //! Add `--indexed` to emit indexed mzML.
@@ -22,27 +26,35 @@ use std::time::Instant;
 
 use openwraw::raw::tq_mrm::TqMrmReader;
 use openwraw::raw::tq_reader::TqReader;
-use openwraw::tq_mixed_mzml::{write_tq_mixed_indexed_mzml, write_tq_mixed_mzml};
+use openwraw::tq_mixed_mzml::{
+    write_tq_mixed_indexed_mzml_with_options, write_tq_mixed_mzml_with_options,
+};
+use openwraw::tq_mrm_spectra::TqMrmSpectrumMode;
 use openwraw::tq_mzml::TqQ3MzmlMode;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
         eprintln!(
-            "usage: tq_mixed_to_mzml <bundle.raw> <out.mzML> <native-ms2|pseudo-ms1> [--indexed]"
+            "usage: tq_mixed_to_mzml <bundle.raw> <out.mzML> <native-ms2|pseudo-ms1> [--mrm-pseudo-ms2] [--indexed]"
         );
         std::process::exit(2);
     }
 
     let bundle = &args[1];
     let output = &args[2];
-    let mode = match args[3].as_str() {
+    let q3_mode = match args[3].as_str() {
         "native-ms2" => TqQ3MzmlMode::NativeMs2,
         "pseudo-ms1" => TqQ3MzmlMode::PseudoMs1,
         other => {
             eprintln!("unsupported mode {other:?}; use native-ms2 or pseudo-ms1");
             std::process::exit(2);
         }
+    };
+    let mrm_mode = if args.iter().any(|arg| arg == "--mrm-pseudo-ms2") {
+        TqMrmSpectrumMode::PseudoMs2
+    } else {
+        TqMrmSpectrumMode::None
     };
     let indexed = args.iter().any(|arg| arg == "--indexed");
 
@@ -64,18 +76,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(output)?;
     let mut writer = BufWriter::new(file);
     if indexed {
-        write_tq_mixed_indexed_mzml(bundle, &mut writer, mode)?;
+        write_tq_mixed_indexed_mzml_with_options(bundle, &mut writer, q3_mode, mrm_mode)?;
     } else {
-        write_tq_mixed_mzml(bundle, &mut writer, mode)?;
+        write_tq_mixed_mzml_with_options(bundle, &mut writer, q3_mode, mrm_mode)?;
     }
 
-    let q3_label = match mode {
+    let q3_label = match q3_mode {
         TqQ3MzmlMode::NativeMs2 => "Q3=native-MS2",
         TqQ3MzmlMode::PseudoMs1 => "Q3=pseudo-MS1",
     };
+    let mrm_label = match mrm_mode {
+        TqMrmSpectrumMode::None => "MRM=SRM-chromatograms",
+        TqMrmSpectrumMode::PseudoMs2 => "MRM=SRM-chromatograms+pseudo-MS2",
+    };
     let indexed_label = if indexed { " indexed" } else { "" };
     eprintln!(
-        "Wrote{indexed_label} mzML to {output} in {:.1}s ({q3_label}, MRM=SRM chromatograms)",
+        "Wrote{indexed_label} mzML to {output} in {:.1}s ({q3_label}, {mrm_label})",
         started.elapsed().as_secs_f64()
     );
     Ok(())
