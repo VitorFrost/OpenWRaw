@@ -1,3 +1,5 @@
+//! Low-level parsers for files inside Waters MassLynx `.raw` bundles.
+
 pub mod chroms;
 pub mod data;
 pub mod extern_inf;
