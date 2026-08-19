@@ -3,6 +3,7 @@
 pub mod mzml;
 pub mod raw;
 pub mod reader;
+pub mod tq_mixed_mzml;
 pub mod tq_mzml;
 
 pub(crate) mod bytes;
