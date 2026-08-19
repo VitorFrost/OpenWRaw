@@ -11,7 +11,7 @@ The TQ path keeps the two acquisition families distinct:
 - **Broad Q3 scans** are decoded as dense m/z-intensity spectra from the low-resolution 6-byte packed representation.
 - **MRM functions** are decoded from 4-byte packed intensities and emitted as one selected-reaction-monitoring chromatogram per Q1 -> Q3 transition.
 
-The mixed mzML writer therefore produces:
+By default, the mixed mzML writer therefore produces:
 
 ```text
 mzML
@@ -37,11 +37,37 @@ Use this for archival conversion and format-faithful interchange.
 
 Projects the broad Q3 spectrum to MS1 for downstream tools that require an MS1 survey stream. The transformation is explicit and the emitted spectrum filter metadata identifies it as an OpenWRaw pseudo-MS1 projection.
 
-MRM data is unaffected by this choice and remains SRM chromatograms.
+The canonical MRM chromatograms are unaffected by this choice.
+
+## Optional MRM pseudo-MS2 compatibility stream
+
+Canonical MRM data is chromatographic, not a native spectrum stream. OpenWRaw therefore keeps SRM chromatograms as the default and authoritative representation.
+
+For spectrum-oriented downstream software, the mixed converter can **add** an explicit compatibility projection with `--mrm-pseudo-ms2`:
+
+- transitions are grouped by Q1 precursor mass for each acquisition cycle;
+- each Q1 group becomes one sparse MS2 spectrum;
+- Q3 product masses form the m/z array;
+- transition signals form the intensity array;
+- Q1 is written as the precursor/selected m/z;
+- the spectrum filter metadata explicitly identifies the record as an OpenWRaw pseudo-MS2 projection.
+
+This option is additive. The original SRM chromatograms remain in `chromatogramList`, so the compatibility projection does not replace or destroy the canonical targeted representation.
+
+When enabled, the mixed structure becomes:
+
+```text
+mzML
+├── spectrumList
+│   ├── broad Q3 scans
+│   └── optional MRM pseudo-MS2 spectra
+└── chromatogramList
+    └── canonical MRM / SRM transition chromatograms
+```
 
 ## Headless mixed conversion
 
-From a source checkout:
+From a source checkout, a format-faithful conversion is:
 
 ```bash
 cargo run -p openwraw --example tq_mixed_to_mzml --release -- \
@@ -55,11 +81,18 @@ cargo run -p openwraw --example tq_mixed_to_mzml --release -- \
   path/to/bundle.raw output.mzML pseudo-ms1
 ```
 
-Add `--indexed` to either command for indexed mzML:
+For a spectrum-oriented workflow that also needs MRM transitions surfaced as sparse MS2 records:
 
 ```bash
 cargo run -p openwraw --example tq_mixed_to_mzml --release -- \
-  path/to/bundle.raw output.mzML pseudo-ms1 --indexed
+  path/to/bundle.raw output.mzML pseudo-ms1 --mrm-pseudo-ms2
+```
+
+Add `--indexed` to any of these commands for indexed mzML:
+
+```bash
+cargo run -p openwraw --example tq_mixed_to_mzml --release -- \
+  path/to/bundle.raw output.mzML pseudo-ms1 --mrm-pseudo-ms2 --indexed
 ```
 
 The converter reports the number of broad-Q3 functions/scans and MRM functions/transitions it detected before writing output.
@@ -111,7 +144,7 @@ for trace in reader.chromatograms()? {
 }
 ```
 
-For mixed mzML output:
+For canonical mixed mzML output:
 
 ```rust
 use openwraw::tq_mixed_mzml::write_tq_mixed_mzml;
@@ -123,6 +156,27 @@ write_tq_mixed_mzml(
     TqQ3MzmlMode::PseudoMs1,
 )?;
 ```
+
+For the additive MRM pseudo-MS2 compatibility projection:
+
+```rust
+use openwraw::tq_mixed_mzml::write_tq_mixed_mzml_with_options;
+use openwraw::tq_mrm_spectra::TqMrmSpectrumMode;
+use openwraw::tq_mzml::TqQ3MzmlMode;
+
+write_tq_mixed_mzml_with_options(
+    "sample.raw",
+    &mut output,
+    TqQ3MzmlMode::PseudoMs1,
+    TqMrmSpectrumMode::PseudoMs2,
+)?;
+```
+
+## MZmine note
+
+Modern MZmine's mzML importer parses `chromatogramList` together with precursor/product structures, so the canonical SRM representation is preserved at import. MZmine's dedicated MRM-to-scans processing workflow may require its MRM service depending on the distribution/license in use.
+
+The optional `--mrm-pseudo-ms2` projection exists for cases where a downstream workflow primarily consumes spectrum lists. It is not required for archival conversion and should not be treated as a replacement for the canonical SRM chromatograms.
 
 ## Confidentiality and regression fixtures
 
