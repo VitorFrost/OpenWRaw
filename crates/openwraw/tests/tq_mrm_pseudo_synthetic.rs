@@ -26,13 +26,15 @@ fn write_bundle(dir: &PathBuf) {
     fs::write(dir.join("_HEADER.TXT"), "$$ Version: 01.00\r\n").unwrap();
 
     // One positive MRM function with 3 transitions split across 2 synthetic Q1 groups.
+    // The first Q1 group's Q3 values are deliberately stored out of m/z order
+    // to verify the pseudo-spectrum projection sorts (Q3, intensity) pairs together.
     let mut function = [0_u8; FUNCTION_RECORD_SIZE];
     function[0] = 0x09;
     function[0x0a0..0x0a4].copy_from_slice(&300.0_f32.to_le_bytes());
     function[0x0a4..0x0a8].copy_from_slice(&300.0_f32.to_le_bytes());
     function[0x0a8..0x0ac].copy_from_slice(&450.0_f32.to_le_bytes());
-    function[0x120..0x124].copy_from_slice(&100.0_f32.to_le_bytes());
-    function[0x124..0x128].copy_from_slice(&150.0_f32.to_le_bytes());
+    function[0x120..0x124].copy_from_slice(&150.0_f32.to_le_bytes());
+    function[0x124..0x128].copy_from_slice(&100.0_f32.to_le_bytes());
     function[0x128..0x12c].copy_from_slice(&200.0_f32.to_le_bytes());
     fs::write(dir.join("_FUNCTNS.INF"), function).unwrap();
 
@@ -42,11 +44,11 @@ fn write_bundle(dir: &PathBuf) {
     fs::write(dir.join("_FUNC001.IDX"), idx).unwrap();
 
     let mut dat = Vec::new();
-    // Cycle 1: 1, 2, 4
+    // Cycle 1, transition order: Q3=150 -> 1; Q3=100 -> 2; Q3=200 -> 4.
     dat.extend_from_slice(&packed_value(10, 1024));
     dat.extend_from_slice(&packed_value(11, 1024));
     dat.extend_from_slice(&packed_value(12, 1024));
-    // Cycle 2: 8, 16, 32
+    // Cycle 2: Q3=150 -> 8; Q3=100 -> 16; Q3=200 -> 32.
     dat.extend_from_slice(&packed_value(13, 1024));
     dat.extend_from_slice(&packed_value(14, 1024));
     dat.extend_from_slice(&packed_value(15, 1024));
@@ -54,7 +56,7 @@ fn write_bundle(dir: &PathBuf) {
 }
 
 #[test]
-fn pseudo_ms2_groups_by_q1_and_preserves_q3_intensities() {
+fn pseudo_ms2_groups_by_q1_sorts_q3_and_preserves_signal_pairing() {
     let dir = temp_bundle();
     write_bundle(&dir);
 
@@ -70,8 +72,9 @@ fn pseudo_ms2_groups_by_q1_and_preserves_q3_intensities() {
 
     let p0 = spectra[0].precursor.as_ref().unwrap();
     assert_eq!(p0.target_mz, Some(300.0));
+    // Q3 is sorted ascending and the signal values move with their Q3 values.
     assert_eq!(spectra[0].mz, vec![100.0, 150.0]);
-    assert_eq!(spectra[0].intensity, vec![1.0, 2.0]);
+    assert_eq!(spectra[0].intensity, vec![2.0, 1.0]);
     assert_eq!(spectra[0].retention_time_sec, 15.0);
 
     let p1 = spectra[1].precursor.as_ref().unwrap();
@@ -79,8 +82,9 @@ fn pseudo_ms2_groups_by_q1_and_preserves_q3_intensities() {
     assert_eq!(spectra[1].mz, vec![200.0]);
     assert_eq!(spectra[1].intensity, vec![4.0]);
 
-    // Second cycle retains the same Q1/Q3 grouping with new signal values.
-    assert_eq!(spectra[2].intensity, vec![8.0, 16.0]);
+    // Second cycle retains the same sorted Q1/Q3 grouping with new signal values.
+    assert_eq!(spectra[2].mz, vec![100.0, 150.0]);
+    assert_eq!(spectra[2].intensity, vec![16.0, 8.0]);
     assert_eq!(spectra[3].intensity, vec![32.0]);
     assert_eq!(spectra[2].retention_time_sec, 30.0);
 
