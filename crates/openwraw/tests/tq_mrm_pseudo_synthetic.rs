@@ -1,6 +1,9 @@
+use openmassspec_core::conformance::assert_source_invariants;
 use openwraw::raw::tq::FUNCTION_RECORD_SIZE;
 use openwraw::raw::tq_mrm::TqMrmReader;
-use openwraw::tq_mrm_spectra::pseudo_ms2_records;
+use openwraw::tq_mixed_mzml::TqMixedSource;
+use openwraw::tq_mrm_spectra::{pseudo_ms2_records, TqMrmSpectrumMode};
+use openwraw::tq_mzml::TqQ3MzmlMode;
 use std::fs;
 use std::path::PathBuf;
 
@@ -94,6 +97,26 @@ fn pseudo_ms2_groups_by_q1_sorts_q3_and_preserves_signal_pairing() {
             .unwrap_or_default()
             .contains("pseudo-MS2")
     }));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pseudo_ms2_mixed_source_satisfies_openmassspec_conformance_contract() {
+    let dir = temp_bundle();
+    write_bundle(&dir);
+
+    // This synthetic bundle intentionally has no Q3 function, so the mixed
+    // source contains exactly the four MRM-derived pseudo-MS2 spectra above.
+    let mut source = TqMixedSource::open_with_mrm_spectra(
+        &dir,
+        TqQ3MzmlMode::NativeMs2,
+        TqMrmSpectrumMode::PseudoMs2,
+    )
+    .unwrap();
+
+    let count = assert_source_invariants(&mut source).unwrap();
+    assert_eq!(count, 4);
 
     let _ = fs::remove_dir_all(&dir);
 }
