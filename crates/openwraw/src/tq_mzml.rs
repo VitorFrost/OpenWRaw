@@ -1,0 +1,340 @@
+//! mzML export for Waters triple-quadrupole broad Q3 scans.
+//!
+//! Two explicit projections are supported:
+//! - [`TqQ3MzmlMode::NativeMs2`] preserves the vendor acquisition as an MS2/Q3 scan.
+//! - [`TqQ3MzmlMode::PseudoMs1`] intentionally projects the same broad spectrum to
+//!   MS1 for untargeted-processing tools that require an MS1 survey stream.
+//!
+//! The pseudo-MS1 path is opt-in and is labeled in the spectrum filter string;
+//! it must not be confused with native MS1 acquisition.
+
+use std::io::Write;
+use std::path::Path;
+
+use openmassspec_core as msc;
+
+use crate::raw::tq::{TqPolarity, TqFunctionKind};
+use crate::raw::tq_reader::{TqDecodedQ3Scan, TqReader};
+
+const SOFTWARE_NAME: &str = "openwraw";
+const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How broad Q3 scans should be represented in mzML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TqQ3MzmlMode {
+    /// Preserve the Waters triple-quadrupole acquisition as MS2.
+    #[default]
+    NativeMs2,
+    /// Explicitly project broad Q3 scans to pseudo-MS1 for untargeted workflows.
+    PseudoMs1,
+}
+
+fn source_file_format_cv() -> msc::CvTerm {
+    msc::CvTerm::new("MS:1000526", "Waters raw format")
+}
+
+fn native_id_format_cv() -> msc::CvTerm {
+    msc::CvTerm::new("MS:1000769", "Waters nativeID format")
+}
+
+fn instrument_cv(name: &str) -> msc::CvTerm {
+    let compact: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect();
+
+    if compact.starts_with("XEVOTQSMICRO") {
+        // PSI-MS MS:1002731 = Xevo TQ-S micro.
+        return msc::CvTerm::new("MS:1002731", "Xevo TQ-S micro");
+    }
+    if compact.starts_with("XEVOTQS") {
+        // PSI-MS MS:1001792 = Xevo TQ-S.
+        return msc::CvTerm::new("MS:1001792", "Xevo TQ-S");
+    }
+    if compact.starts_with("XEVOTQ") {
+        // Generic Xevo triple-quadrupole model from the older PSI-MS branch.
+        return msc::CvTerm::new("MS:1001790", "Xevo TQ MS");
+    }
+    msc::CvTerm::new("MS:1000126", "Waters instrument model")
+}
+
+fn polarity_for(polarity: Option<TqPolarity>) -> Option<msc::Polarity> {
+    match polarity {
+        Some(TqPolarity::Positive) => Some(msc::Polarity::Positive),
+        Some(TqPolarity::Negative) => Some(msc::Polarity::Negative),
+        None => None,
+    }
+}
+
+fn native_id_for(function_index: u32, scan_index_zero_based: usize) -> String {
+    format!(
+        "function={function_index} process=0 scan={}",
+        scan_index_zero_based + 1
+    )
+}
+
+fn bundle_name(reader: &TqReader) -> String {
+    reader
+        .dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bundle.raw".to_owned())
+}
+
+fn run_metadata_for(reader: &TqReader) -> msc::RunMetadata {
+    let instrument_name = reader
+        .header
+        .instrument
+        .clone()
+        .unwrap_or_else(|| "Waters".to_owned());
+
+    msc::RunMetadata {
+        extra: ::std::collections::BTreeMap::new(),
+        source_file_name: bundle_name(reader),
+        source_file_format: source_file_format_cv(),
+        native_id_format: native_id_format_cv(),
+        instrument: instrument_cv(&instrument_name),
+        instrument_serial_number: None,
+        software_name: SOFTWARE_NAME.to_owned(),
+        software_version: SOFTWARE_VERSION.to_owned(),
+        acquisition_software_name: None,
+        acquisition_software_version: None,
+        start_timestamp: None,
+        mobility_array_kind: None,
+        analyzers: vec![msc::Analyzer::TQMS],
+    }
+}
+
+fn summarize_arrays(
+    mz: &[f64],
+    intensity: &[f32],
+) -> (f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    if mz.is_empty() {
+        return (0.0, None, None, None, None);
+    }
+
+    let mut tic = 0.0_f64;
+    let mut base_peak_intensity = f32::NEG_INFINITY;
+    let mut base_peak_mz = mz[0];
+    let mut low_mz = f64::INFINITY;
+    let mut high_mz = f64::NEG_INFINITY;
+
+    for (&mass, &signal) in mz.iter().zip(intensity.iter()) {
+        tic += signal as f64;
+        if signal > base_peak_intensity {
+            base_peak_intensity = signal;
+            base_peak_mz = mass;
+        }
+        low_mz = low_mz.min(mass);
+        high_mz = high_mz.max(mass);
+    }
+
+    (
+        tic,
+        Some(base_peak_mz),
+        Some(base_peak_intensity as f64),
+        Some(low_mz),
+        Some(high_mz),
+    )
+}
+
+fn record_from_scan(
+    mode: TqQ3MzmlMode,
+    scan_counter: u32,
+    scan: TqDecodedQ3Scan,
+) -> msc::SpectrumRecord {
+    let (tic, base_peak_mz, base_peak_intensity, low_mz, high_mz) =
+        summarize_arrays(&scan.spectrum.mz, &scan.spectrum.intensity);
+
+    let (ms_level, precursor, filter) = match mode {
+        TqQ3MzmlMode::NativeMs2 => {
+            let target_mz = if scan.set_mass_da.is_finite() {
+                Some(scan.set_mass_da as f64)
+            } else {
+                None
+            };
+            (
+                2,
+                Some(msc::PrecursorInfo {
+                    target_mz,
+                    analyzer: Some(msc::Analyzer::TQMS),
+                    ..Default::default()
+                }),
+                Some("Waters TQ broad Q3 scan (native MS2 semantics)".to_owned()),
+            )
+        }
+        TqQ3MzmlMode::PseudoMs1 => (
+            1,
+            None,
+            Some("OpenWRaw pseudo-MS1 projection of Waters TQ broad Q3 scan".to_owned()),
+        ),
+    };
+
+    msc::SpectrumRecord {
+        extra: ::std::collections::BTreeMap::new(),
+        acquisition_event_id: None,
+        index: (scan_counter as usize).saturating_sub(1),
+        scan_number: scan_counter,
+        native_id: native_id_for(scan.function_index, scan.scan_index),
+        ms_level,
+        polarity: polarity_for(scan.polarity),
+        scan_mode: Some(msc::ScanMode::Profile),
+        analyzer: Some(msc::Analyzer::TQMS),
+        filter,
+        retention_time_sec: scan.retention_time_min as f64 * 60.0,
+        total_ion_current: Some(tic),
+        base_peak_mz,
+        base_peak_intensity,
+        low_mz,
+        high_mz,
+        ion_injection_time_ms: None,
+        inv_mobility: None,
+        faims_cv: None,
+        precursor,
+        mz: scan.spectrum.mz,
+        intensity: scan.spectrum.intensity,
+        inv_mobility_per_peak: None,
+    }
+}
+
+/// Streaming `openmassspec-core` source for TQ Q3 scans.
+pub struct TqQ3Source {
+    reader: TqReader,
+    mode: TqQ3MzmlMode,
+}
+
+impl TqQ3Source {
+    pub fn new(reader: TqReader, mode: TqQ3MzmlMode) -> Self {
+        Self { reader, mode }
+    }
+
+    pub fn open<P: AsRef<Path>>(dir: P, mode: TqQ3MzmlMode) -> crate::Result<Self> {
+        Ok(Self::new(TqReader::open(dir)?, mode))
+    }
+
+    pub fn reader(&self) -> &TqReader {
+        &self.reader
+    }
+
+    pub fn mode(&self) -> TqQ3MzmlMode {
+        self.mode
+    }
+}
+
+impl msc::SpectrumSource for TqQ3Source {
+    fn run_metadata(&self) -> msc::RunMetadata {
+        run_metadata_for(&self.reader)
+    }
+
+    fn iter_spectra<'s>(&'s mut self) -> Box<dyn Iterator<Item = msc::SpectrumRecord> + 's> {
+        let reader = &self.reader;
+        let mode = self.mode;
+        let mut scan_counter = 0_u32;
+        Box::new(reader.iter_scans().filter_map(move |decoded| {
+            scan_counter += 1;
+            decoded
+                .ok()
+                .map(|scan| record_from_scan(mode, scan_counter, scan))
+        }))
+    }
+
+    fn spectrum_count_hint(&self) -> Option<usize> {
+        Some(self.reader.total_q3_scan_count())
+    }
+
+    fn iter_chromatograms<'s>(
+        &'s mut self,
+    ) -> Box<dyn Iterator<Item = msc::ChromatogramRecord> + 's> {
+        Box::new(std::iter::empty())
+    }
+}
+
+/// Write broad Q3 scans to mzML using the selected semantic projection.
+pub fn write_tq_q3_mzml<P: AsRef<Path>, W: Write>(
+    dir: P,
+    out: &mut W,
+    mode: TqQ3MzmlMode,
+) -> crate::Result<()> {
+    let mut source = TqQ3Source::open(dir, mode)?;
+    msc::write_mzml(&mut source, out).map_err(crate::Error::Io)?;
+    Ok(())
+}
+
+/// Indexed-mzML equivalent of [`write_tq_q3_mzml`].
+pub fn write_tq_q3_indexed_mzml<P: AsRef<Path>, W: Write>(
+    dir: P,
+    out: &mut W,
+    mode: TqQ3MzmlMode,
+) -> crate::Result<()> {
+    let mut source = TqQ3Source::open(dir, mode)?;
+    msc::write_indexed_mzml(&mut source, out).map_err(crate::Error::Io)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raw::data::Spectrum;
+
+    fn synthetic_scan() -> TqDecodedQ3Scan {
+        TqDecodedQ3Scan {
+            function_index: 3,
+            scan_index: 4,
+            retention_time_min: 1.5,
+            polarity: Some(TqPolarity::Negative),
+            set_mass_da: 40.0,
+            declared_mz_low: 75.0,
+            declared_mz_high: 900.0,
+            spectrum: Spectrum {
+                mz: vec![100.0, 150.0, 200.0],
+                intensity: vec![2.0, 10.0, 3.0],
+            },
+        }
+    }
+
+    #[test]
+    fn native_mode_preserves_ms2_and_precursor_context() {
+        let record = record_from_scan(TqQ3MzmlMode::NativeMs2, 1, synthetic_scan());
+        assert_eq!(record.ms_level, 2);
+        assert_eq!(record.scan_mode, Some(msc::ScanMode::Profile));
+        assert_eq!(record.analyzer, Some(msc::Analyzer::TQMS));
+        assert_eq!(record.polarity, Some(msc::Polarity::Negative));
+        assert_eq!(record.precursor.unwrap().target_mz, Some(40.0));
+    }
+
+    #[test]
+    fn pseudo_mode_is_explicit_ms1_without_precursor() {
+        let record = record_from_scan(TqQ3MzmlMode::PseudoMs1, 1, synthetic_scan());
+        assert_eq!(record.ms_level, 1);
+        assert!(record.precursor.is_none());
+        assert!(record
+            .filter
+            .as_deref()
+            .unwrap_or_default()
+            .contains("pseudo-MS1"));
+    }
+
+    #[test]
+    fn summary_matches_arrays() {
+        let record = record_from_scan(TqQ3MzmlMode::PseudoMs1, 1, synthetic_scan());
+        assert_eq!(record.total_ion_current, Some(15.0));
+        assert_eq!(record.base_peak_mz, Some(150.0));
+        assert_eq!(record.base_peak_intensity, Some(10.0));
+        assert_eq!(record.low_mz, Some(100.0));
+        assert_eq!(record.high_mz, Some(200.0));
+    }
+
+    #[test]
+    fn instrument_mapping_handles_compact_tq_s_micro_header_strings() {
+        let cv = instrument_cv("XEVO-TQSmicro#serial-redacted");
+        assert_eq!(cv.accession, "MS:1002731");
+        assert_eq!(cv.name, "Xevo TQ-S micro");
+    }
+
+    #[test]
+    fn q3_source_mode_enum_is_independent_of_function_kind() {
+        assert_eq!(TqFunctionKind::Q3Scan, TqFunctionKind::Q3Scan);
+        assert_ne!(TqFunctionKind::Q3Scan, TqFunctionKind::Mrm);
+    }
+}
