@@ -14,6 +14,7 @@ const sidebars: SidebarsConfig = {
         'guide/encodings',
         'guide/ims',
         'guide/chromatograms',
+        'guide/tq',
       ],
     },
     {
