@@ -8,4 +8,5 @@ pub mod functions_inf;
 pub mod header;
 pub mod index;
 pub mod tq;
+pub mod tq_mrm;
 pub mod tq_reader;
