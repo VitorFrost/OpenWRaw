@@ -5,7 +5,7 @@ use openwraw::tq_mixed_mzml::TqMixedSource;
 use openwraw::tq_mrm_spectra::{pseudo_ms2_records, TqMrmSpectrumMode};
 use openwraw::tq_mzml::TqQ3MzmlMode;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn temp_bundle() -> PathBuf {
     std::env::temp_dir().join(format!("openwraw-tq-mrm-pseudo-{}", std::process::id()))
@@ -23,7 +23,7 @@ fn packed_value(power: u32, base: u32) -> [u8; 4] {
     ((power << 22) | (base & 0x001f_ffff)).to_le_bytes()
 }
 
-fn write_bundle(dir: &PathBuf) {
+fn write_bundle(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join("_HEADER.TXT"), "$$ Version: 01.00\r\n").unwrap();
