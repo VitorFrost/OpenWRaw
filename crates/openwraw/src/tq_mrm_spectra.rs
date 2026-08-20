@@ -5,6 +5,7 @@
 //! Each acquisition cycle is grouped by Q1 precursor mass and converted into
 //! a sparse MS2 spectrum whose m/z axis is the set of Q3 product masses.
 
+use std::collections::BTreeMap;
 use std::fs;
 
 use openmassspec_core as msc;
@@ -103,9 +104,6 @@ fn sorted_group_arrays(
         })
         .collect();
 
-    // MRM transition order is method-defined and need not be ascending in Q3.
-    // A spectrum representation is easier and safer for downstream consumers
-    // when m/z is ordered, so sort pairs together and preserve signal pairing.
     pairs.sort_by(|a, b| {
         a.0.partial_cmp(&b.0)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -149,14 +147,25 @@ fn function_pseudo_ms2(
             let (tic, base_peak_mz, base_peak_intensity, low_mz, high_mz) =
                 summarize(&mz, &intensity);
             let index = index_offset + output.len();
+            let mut extra = BTreeMap::new();
+            extra.insert(
+                "openwraw.projection".to_owned(),
+                "pseudo-ms2-from-mrm".to_owned(),
+            );
+            extra.insert(
+                "openwraw.source_acquisition".to_owned(),
+                "Waters TQ MRM transition group".to_owned(),
+            );
+
             output.push(msc::SpectrumRecord {
-                extra: ::std::collections::BTreeMap::new(),
+                extra,
                 acquisition_event_id: None,
                 index,
                 scan_number: (index + 1) as u32,
                 // Keep the declared Waters nativeID token structure. The
-                // process number is used only to distinguish synthetic Q1
-                // groups from the same physical acquisition cycle.
+                // process number distinguishes synthetic Q1 groups from the
+                // same physical acquisition cycle. Canonical SRM
+                // chromatograms remain the authoritative targeted data.
                 native_id: format!(
                     "function={} process={} scan={}",
                     function.index,
@@ -167,9 +176,7 @@ fn function_pseudo_ms2(
                 polarity: polarity_for(function.descriptor.polarity),
                 scan_mode: Some(msc::ScanMode::Centroid),
                 analyzer: Some(msc::Analyzer::TQMS),
-                filter: Some(
-                    "OpenWRaw pseudo-MS2 projection of Waters TQ MRM transitions".to_owned(),
-                ),
+                filter: None,
                 retention_time_sec: index_record.retention_time_min as f64 * 60.0,
                 total_ion_current: Some(tic),
                 base_peak_mz,
@@ -196,9 +203,6 @@ fn function_pseudo_ms2(
 }
 
 /// Convert all MRM functions into optional sparse pseudo-MS2 spectra.
-///
-/// `index_offset` is used when these records are appended after another
-/// spectrum stream so global mzML spectrum indices remain contiguous.
 pub fn pseudo_ms2_records(
     reader: &TqMrmReader,
     index_offset: usize,
