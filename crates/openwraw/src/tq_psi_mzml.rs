@@ -59,8 +59,6 @@ fn corrected_plain_mzml<S: msc::SpectrumSource + ?Sized>(
 }
 
 fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<String> {
-    // fileContent must describe what is actually present in spectrumList,
-    // rather than unconditionally advertising both MS1 and MSn.
     let spectrum_body = xml
         .split_once("<spectrumList")
         .map(|(_, body)| body)
@@ -90,10 +88,6 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
     }
     xml = xml.replacen(old_file_content, &new_file_content, 1);
 
-    // A Waters RAW source is a directory bundle. Use a deterministic SHA-1
-    // over all source files (sorted relative path + size + bytes) and state the
-    // convention explicitly so the value is reproducible rather than implying
-    // that a directory has a vendor-defined byte stream.
     let source_close = "      </sourceFile>";
     let source_insert = format!(
         concat!(
@@ -111,10 +105,6 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
     }
     xml = xml.replacen(source_close, &source_insert, 1);
 
-    // openmassspec-core 1.5.0 always emits an <activation> element for an
-    // MS2 precursor. When the exact mechanism is not decoded, PSI semantic
-    // validation still requires a child of "dissociation method". Do not
-    // invent CID; use the generic parent term.
     xml = xml.replace(
         "            <activation>\n            </activation>",
         concat!(
@@ -124,16 +114,11 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
         ),
     );
 
-    // The generic core chromatogram writer currently assumes CID for every
-    // SRM precursor. TQ decoding has not yet exposed a method-level activation
-    // identity, so replace that assertion with the generic PSI dissociation
-    // term rather than fabricating a mechanism.
     xml = xml.replace(
         "<cvParam cvRef=\"MS\" accession=\"MS:1000133\" name=\"collision-induced dissociation\" value=\"\"/>",
         "<cvParam cvRef=\"MS\" accession=\"MS:1000044\" name=\"dissociation method\" value=\"\"/>",
     );
 
-    // PSI units for spectrum-level mass/intensity attributes.
     xml = xml.replace(
         "name=\"base peak m/z\" value=\"",
         "name=\"base peak m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"",
@@ -150,8 +135,6 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
         "name=\"highest observed m/z\" value=\"",
         "name=\"highest observed m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"",
     );
-
-    // Intensity arrays (spectra and chromatograms) should identify their unit.
     xml = xml.replace(
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/>",
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>",
@@ -184,28 +167,26 @@ fn build_indexed_mzml(plain: &str) -> crate::Result<Vec<u8>> {
 
     let index_list_offset = out.len();
     let index_count = 1 + usize::from(!chromatogram_offsets.is_empty());
-    writeln!(&mut out, "  <indexList count=\"{index_count}\">")?;
-    writeln!(&mut out, "    <index name=\"spectrum\">")?;
+    writeln!(&mut out, "<indexList count=\"{index_count}\">")?;
+    writeln!(&mut out, "  <index name=\"spectrum\">")?;
     for (id, offset) in &spectrum_offsets {
-        writeln!(&mut out, "      <offset idRef=\"{id}\">{offset}</offset>")?;
+        writeln!(&mut out, "    <offset idRef=\"{id}\">{offset}</offset>")?;
     }
-    writeln!(&mut out, "    </index>")?;
+    writeln!(&mut out, "  </index>")?;
     if !chromatogram_offsets.is_empty() {
-        writeln!(&mut out, "    <index name=\"chromatogram\">")?;
+        writeln!(&mut out, "  <index name=\"chromatogram\">")?;
         for (id, offset) in &chromatogram_offsets {
-            writeln!(&mut out, "      <offset idRef=\"{id}\">{offset}</offset>")?;
+            writeln!(&mut out, "    <offset idRef=\"{id}\">{offset}</offset>")?;
         }
-        writeln!(&mut out, "    </index>")?;
+        writeln!(&mut out, "  </index>")?;
     }
-    writeln!(&mut out, "  </indexList>")?;
+    writeln!(&mut out, "</indexList>")?;
     writeln!(
         &mut out,
-        "  <indexListOffset>{index_list_offset}</indexListOffset>"
+        "<indexListOffset>{index_list_offset}</indexListOffset>"
     )?;
 
-    // The indexed mzML schema defines fileChecksum over the byte stream from
-    // the beginning of the file through the end of the opening fileChecksum tag.
-    out.extend_from_slice(b"  <fileChecksum>");
+    out.extend_from_slice(b"<fileChecksum>");
     let digest = sha1_bytes(&out);
     let hex = hex_digest(&digest);
     out.extend_from_slice(hex.as_bytes());
@@ -322,7 +303,6 @@ fn hex_digest(digest: &[u8; 20]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[derive(Clone)]
 struct Sha1 {
     state: [u32; 5],
     count: u64,
@@ -360,11 +340,13 @@ impl Sha1 {
     fn compress(&mut self) {
         let mut words = [0_u32; 80];
         for (index, word) in words.iter_mut().enumerate().take(16) {
-            *word = u32::from_be_bytes(
-                self.buffer[index * 4..index * 4 + 4]
-                    .try_into()
-                    .expect("four-byte SHA-1 word"),
-            );
+            let base = index * 4;
+            *word = u32::from_be_bytes([
+                self.buffer[base],
+                self.buffer[base + 1],
+                self.buffer[base + 2],
+                self.buffer[base + 3],
+            ]);
         }
         for index in 16..80 {
             words[index] = (words[index - 3]
@@ -462,6 +444,11 @@ mod tests {
         );
         let indexed = build_indexed_mzml(plain).unwrap();
         let text = String::from_utf8(indexed.clone()).unwrap();
+        let index_offset_start = text.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
+        let index_offset_end = text[index_offset_start..].find('<').unwrap() + index_offset_start;
+        let index_offset: usize = text[index_offset_start..index_offset_end].parse().unwrap();
+        assert!(text[index_offset..].starts_with("<indexList"));
+
         let checksum_start = text.find("<fileChecksum>").unwrap();
         let value_start = checksum_start + "<fileChecksum>".len();
         let value_end = text[value_start..].find('<').unwrap() + value_start;
