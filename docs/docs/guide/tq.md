@@ -23,7 +23,7 @@ mzML
 
 MRM chromatograms use PSI-MS `MS:1001473` (`selected reaction monitoring chromatogram`) and carry explicit precursor and product m/z values.
 
-Broad Q3 functions are merged by retention time rather than emitted as separate function-sized blocks. This preserves acquisition chronology in polarity-switching or otherwise interleaved runs while each spectrum retains its original Waters function/scan native ID.
+Broad Q3 functions are merged by retention time rather than emitted as separate function-sized blocks. This preserves acquisition chronology in polarity-switching or otherwise interleaved runs while each spectrum retains its Waters `function/process/scan` identity.
 
 ## Q3 semantics
 
@@ -33,11 +33,11 @@ Waters triple-quadrupole broad scans may be recorded as MS2/Q3 scans even when t
 
 Preserves the vendor acquisition semantics. Broad Q3 scans remain MS2 and retain valid non-zero function-level precursor/set-mass context when present.
 
-Use this for archival conversion and format-faithful interchange.
+Use this for format-faithful interchange.
 
 ### `pseudo-ms1`
 
-Projects the broad Q3 spectrum to MS1 for downstream tools that require an MS1 survey stream. The transformation is explicit and the emitted spectrum filter metadata identifies it as an OpenWRaw pseudo-MS1 projection.
+Projects the broad Q3 spectrum to MS1 for downstream tools that require an MS1 survey stream. The transformation is explicit and is written as an `openwraw.projection` `userParam`; OpenWRaw does **not** misuse the Thermo-specific PSI `filter string` term for this annotation.
 
 The canonical MRM chromatograms are unaffected by this choice.
 
@@ -52,7 +52,7 @@ For spectrum-oriented downstream software, the mixed converter can **add** an ex
 - Q3 product masses form the m/z array and are sorted while retaining their paired intensities;
 - transition signals form the intensity array;
 - Q1 is written as the precursor/selected m/z;
-- the spectrum filter metadata explicitly identifies the record as an OpenWRaw pseudo-MS2 projection.
+- `openwraw.projection=pseudo-ms2-from-mrm` records that the spectrum is generated rather than native.
 
 This option is additive. The original SRM chromatograms remain in `chromatogramList`, so the compatibility projection does not replace or destroy the canonical targeted representation.
 
@@ -68,6 +68,23 @@ mzML
 └── chromatogramList
     └── canonical MRM / SRM transition chromatograms
 ```
+
+## PSI mzML semantics
+
+The TQ conversion path applies an additional PSI-oriented serialization pass after the generic OpenMassSpecCore 1.5.0 writer. This is deliberately scoped to TQ output so the established QTOF/IMS writer behavior is not changed by this experimental feature.
+
+The correction layer currently ensures that:
+
+- `fileContent` advertises only MS1/MSn spectrum types actually emitted;
+- the Waters source bundle carries a reproducible SHA-1 checksum and an explicit description of the OpenWRaw bundle-hash convention;
+- an unknown MS2/SRM dissociation mechanism is represented by the generic PSI `MS:1000044` `dissociation method` term rather than an empty activation or invented CID assertion;
+- projection provenance is carried in `userParam` values instead of `MS:1000512 filter string`;
+- intensity arrays and spectrum-level mass/intensity summary values carry appropriate PSI units;
+- the instrument configuration contains a PSI `componentList` with a conservative ionization source, Q1 quadrupole, Q3 quadrupole, and detector. Generic parent terms are used for source/detector type until more specific native metadata is decoded;
+- Q3 `lowest/highest observed m/z` remain based on the decoded spectrum, while `scanWindow` uses the programmed lower/upper acquisition bounds from `_FUNCTNS.INF`;
+- indexed mzML offsets are calculated only after these semantic corrections, and `fileChecksum` is recomputed over the corrected indexed document according to the indexed-mzML checksum convention.
+
+The TQ serializer is tied to the exact `openmassspec-core` version in `Cargo.lock`; its string-level corrections must be reviewed whenever that dependency's mzML writer changes.
 
 ## Headless mixed conversion
 
@@ -193,12 +210,16 @@ Repository tests for this path must use either:
 
 Private data may be used locally to verify that a generic decoder behaves correctly, but tests and documentation committed to the repository must not contain sample identifiers, private method details, real transition lists, chromatographic results, internal paths, serial numbers, or byte sequences copied from a closed run.
 
+**Generated mzML from a confidential RAW is itself confidential.** It contains source-derived spectral/chromatographic data and identifies the source bundle by name and a reproducible SHA-1 fingerprint. Do not publish a converted private mzML merely because the OpenWRaw source code and synthetic tests are safe to publish.
+
 ## Current limitations
 
-The mixed converter currently focuses on the information required for structurally correct Q3 spectra and MRM chromatograms. Additional Waters side-file metadata such as compound labels and per-transition method parameters can be exposed later once their API and mzML representation are defined cleanly.
+The mixed converter currently focuses on the information required for structurally and semantically defensible Q3 spectra and MRM chromatograms. Additional Waters side-file metadata such as compound labels and per-transition method parameters can be exposed later once their API and mzML representation are defined cleanly.
 
 MRM functions are currently required to have a constant non-zero transition count across their populated acquisition cycles. Zero-point cycles are skipped. Scheduled/dynamic MRM functions that change the active transition count within one function are rejected rather than guessed, because the current format model does not yet establish an unambiguous per-cycle mapping from the changing DAT channel set back to the 32 Q1/Q3 descriptor slots.
 
 The current MRM transition model also assumes the active Q1/Q3 descriptor entries occupy the leading transition slots. This is validated for the format family used to develop the reader but has not yet been generalized to sparse/non-contiguous descriptor-slot schedules.
+
+Specific ion-source and detector component types are not yet decoded from the TQ RAW path, so the mzML component list uses PSI parent terms for those two components while representing Q1 and Q3 explicitly as quadrupoles.
 
 The legacy QTOF/IMS `Reader::open` path is intentionally unchanged. TQ support currently uses the dedicated TQ readers and conversion functions documented above.
