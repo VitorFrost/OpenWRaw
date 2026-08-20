@@ -18,7 +18,6 @@ use openmassspec_core as msc;
 
 use crate::raw::tq_reader::TqReader;
 
-/// Serialize a TQ source as PSI-corrected, non-indexed mzML.
 pub fn write_tq_psi_mzml<S: msc::SpectrumSource + ?Sized, P: AsRef<Path>, W: Write>(
     source: &mut S,
     source_dir: P,
@@ -29,7 +28,6 @@ pub fn write_tq_psi_mzml<S: msc::SpectrumSource + ?Sized, P: AsRef<Path>, W: Wri
     Ok(())
 }
 
-/// Serialize a TQ source as PSI-corrected indexed mzML.
 pub fn write_tq_psi_indexed_mzml<
     S: msc::SpectrumSource + ?Sized,
     P: AsRef<Path>,
@@ -69,6 +67,10 @@ fn apply_psi_corrections(
         .unwrap_or("");
     let has_ms1 = spectrum_body.contains("accession=\"MS:1000579\"");
     let has_msn = spectrum_body.contains("accession=\"MS:1000580\"");
+    let has_srm = xml
+        .split_once("<chromatogramList")
+        .map(|(_, body)| body.contains("accession=\"MS:1001473\""))
+        .unwrap_or(false);
 
     let old_file_content = concat!(
         "      <cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>\n",
@@ -83,6 +85,11 @@ fn apply_psi_corrections(
     if has_msn {
         new_file_content.push_str(
             "      <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n",
+        );
+    }
+    if has_srm {
+        new_file_content.push_str(
+            "      <cvParam cvRef=\"MS\" accession=\"MS:1001473\" name=\"selected reaction monitoring chromatogram\" value=\"\"/>\n",
         );
     }
     if !xml.contains(old_file_content) {
@@ -109,11 +116,6 @@ fn apply_psi_corrections(
     }
     xml = xml.replacen(source_close, &source_insert, 1);
 
-    // The generic core serializer does not currently expose source/analyzer/
-    // detector components in the PSI componentList hierarchy. TQ export uses
-    // conservative parent terms where the native parser has not decoded a
-    // more specific component. Two quadrupoles represent the Q1 and Q3 mass
-    // filters; the collision cell is not claimed as a mass analyzer.
     let instrument_close = "    </instrumentConfiguration>";
     let instrument_components = concat!(
         "      <componentList count=\"4\">\n",
@@ -545,6 +547,31 @@ mod tests {
         assert_eq!(fixed.matches("name=\"quadrupole\"").count(), 2);
         assert!(fixed.contains("name=\"ionization type\""));
         assert!(fixed.contains("name=\"detector type\""));
+    }
+
+    #[test]
+    fn file_content_includes_srm_when_chromatograms_are_present() {
+        let xml = concat!(
+            "<fileContent>\n",
+            "      <cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>\n",
+            "      <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n",
+            "</fileContent>\n",
+            "<sourceFile>\n      </sourceFile>\n",
+            "<instrumentConfiguration id=\"IC1\">\n    </instrumentConfiguration>\n",
+            "<spectrumList></spectrumList>",
+            "<chromatogramList><chromatogram><cvParam accession=\"MS:1001473\" name=\"selected reaction monitoring chromatogram\"/></chromatogram></chromatogramList>"
+        );
+        let fixed = apply_psi_corrections(xml.to_owned(), "deadbeef", &BTreeMap::new()).unwrap();
+        let content = fixed
+            .split_once("<fileContent>")
+            .unwrap()
+            .1
+            .split_once("</fileContent>")
+            .unwrap()
+            .0;
+        assert!(!content.contains("MS:1000579"));
+        assert!(!content.contains("MS:1000580"));
+        assert!(content.contains("MS:1001473"));
     }
 
     #[test]
