@@ -193,6 +193,7 @@ fn validate_mrm_layout(
     bytes_per_pair: usize,
     dat_size: u64,
 ) -> crate::Result<()> {
+    let mut previous_rt: Option<f32> = None;
     for (cycle_index, record) in scan_index.iter().enumerate() {
         if !record.retention_time_min.is_finite() || record.retention_time_min < 0.0 {
             return Err(crate::Error::Parse(format!(
@@ -201,6 +202,16 @@ fn validate_mrm_layout(
                 record.retention_time_min
             )));
         }
+        if let Some(previous) = previous_rt {
+            if record.retention_time_min < previous {
+                return Err(crate::Error::Parse(format!(
+                    "TQ MRM reader: function {function_index} retention time decreases from {previous} to {} at cycle {}",
+                    record.retention_time_min,
+                    cycle_index + 1
+                )));
+            }
+        }
+        previous_rt = Some(record.retention_time_min);
 
         let range = scan_byte_range(scan_index, cycle_index, bytes_per_pair, dat_size)?;
         if let Some(next) = scan_index.get(cycle_index + 1) {
@@ -313,11 +324,8 @@ mod tests {
     #[test]
     fn decodes_synthetic_4_byte_intensities() {
         let mut bytes = Vec::new();
-        // power 10, base 1024 -> 1.0
         bytes.extend_from_slice(&packed_mrm_value(10, 1024));
-        // power 12, base 1024 -> 4.0
         bytes.extend_from_slice(&packed_mrm_value(12, 1024));
-        // power 11, base 1536 -> 3.0
         bytes.extend_from_slice(&packed_mrm_value(11, 1536));
 
         let values = decode_mrm4_cycle(&bytes).unwrap();
@@ -349,6 +357,25 @@ mod tests {
         bytes.extend_from_slice(&idx_record(8, 2, 0.2));
         let index = parse_idx22(&bytes).unwrap();
         assert_eq!(consistent_transition_count(1, &index).unwrap(), 2);
+    }
+
+    #[test]
+    fn rejects_decreasing_mrm_retention_time() {
+        let index = vec![
+            TqIndexRecord {
+                dat_offset: 0,
+                packed: 2,
+                pair_count: 2,
+                retention_time_min: 0.2,
+            },
+            TqIndexRecord {
+                dat_offset: 8,
+                packed: 2,
+                pair_count: 2,
+                retention_time_min: 0.1,
+            },
+        ];
+        assert!(validate_mrm_layout(1, &index, 4, 16).is_err());
     }
 
     #[test]
