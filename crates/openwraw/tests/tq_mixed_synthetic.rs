@@ -211,7 +211,18 @@ fn mixed_mzml_applies_psi_semantic_corrections() {
     assert!(!file_content.contains("MS:1000580"));
 
     assert!(xml.contains("<instrumentConfigurationList count=\"1\">"));
-    assert!(!xml.contains("accession=\"MS:1000081\" name=\"quadrupole\""));
+    assert!(xml.contains("<componentList count=\"4\">"));
+    assert_eq!(xml.matches("name=\"quadrupole\"").count(), 2);
+    assert!(xml.contains("name=\"ionization type\""));
+    assert!(xml.contains("name=\"detector type\""));
+
+    // The stored points span 100.0..100.5, but the synthetic acquisition
+    // descriptor declares a wider programmed Q3 scan window. Both concepts
+    // must remain distinct in mzML.
+    assert!(xml.contains("name=\"lowest observed m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"100.000000\""));
+    assert!(xml.contains("name=\"highest observed m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"100.500000\""));
+    assert!(xml.contains("name=\"scan window lower limit\" value=\"75.000000\""));
+    assert!(xml.contains("name=\"scan window upper limit\" value=\"900.000000\""));
 
     let _ = fs::remove_dir_all(&dir);
 }
