@@ -72,11 +72,16 @@ impl TqMixedSource {
         let q3 = TqQ3Source::open(dir, q3_mode)?;
         let mrm = TqMrmReader::open(dir)?;
         let mrm_traces = mrm.chromatograms()?;
-        let q3_count = q3.spectrum_count_hint().unwrap_or(0);
-        let mrm_spectra = match mrm_spectrum_mode {
+        let mut mrm_spectra = match mrm_spectrum_mode {
             TqMrmSpectrumMode::None => Vec::new(),
-            TqMrmSpectrumMode::PseudoMs2 => pseudo_ms2_records(&mrm, q3_count)?,
+            // Indices are reassigned after chronological merging with Q3 scans.
+            TqMrmSpectrumMode::PseudoMs2 => pseudo_ms2_records(&mrm, 0)?,
         };
+        mrm_spectra.sort_by(|left, right| {
+            left.retention_time_sec
+                .total_cmp(&right.retention_time_sec)
+                .then_with(|| left.native_id.cmp(&right.native_id))
+        });
 
         Ok(Self {
             q3,
@@ -109,12 +114,30 @@ impl SpectrumSource for TqMixedSource {
     }
 
     fn iter_spectra<'s>(&'s mut self) -> Box<dyn Iterator<Item = msc::SpectrumRecord> + 's> {
-        let q3_iter = self.q3.iter_spectra();
         if self.mrm_spectra.is_empty() {
-            q3_iter
-        } else {
-            Box::new(q3_iter.chain(self.mrm_spectra.clone()))
+            return self.q3.iter_spectra();
         }
+
+        let mut q3 = self.q3.iter_spectra().peekable();
+        let mut mrm = self.mrm_spectra.clone().into_iter().peekable();
+        let mut output_index = 0_usize;
+
+        Box::new(std::iter::from_fn(move || {
+            let take_q3 = match (q3.peek(), mrm.peek()) {
+                (Some(q3_record), Some(mrm_record)) => {
+                    q3_record.retention_time_sec <= mrm_record.retention_time_sec
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => return None,
+            };
+
+            let mut record = if take_q3 { q3.next()? } else { mrm.next()? };
+            record.index = output_index;
+            record.scan_number = (output_index + 1) as u32;
+            output_index += 1;
+            Some(record)
+        }))
     }
 
     fn spectrum_count_hint(&self) -> Option<usize> {
