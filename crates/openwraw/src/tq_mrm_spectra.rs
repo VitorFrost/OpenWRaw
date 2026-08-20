@@ -103,9 +103,9 @@ fn sorted_group_arrays(
         })
         .collect();
 
-    // OpenMassSpec's spectrum conformance contract requires ascending m/z.
-    // MRM transition order is method-defined and therefore cannot be assumed
-    // to be sorted by Q3. Sort pairs together so signal stays attached to Q3.
+    // MRM transition order is method-defined and need not be ascending in Q3.
+    // A spectrum representation is easier and safer for downstream consumers
+    // when m/z is ordered, so sort pairs together and preserve signal pairing.
     pairs.sort_by(|a, b| {
         a.0.partial_cmp(&b.0)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -122,6 +122,11 @@ fn function_pseudo_ms2(
     let mut output = Vec::with_capacity(function.cycle_count() * groups.len());
 
     for cycle_index in 0..function.cycle_count() {
+        let index_record = &function.scan_index[cycle_index];
+        if index_record.pair_count == 0 {
+            continue;
+        }
+
         let range = scan_byte_range(
             &function.scan_index,
             cycle_index,
@@ -162,8 +167,7 @@ fn function_pseudo_ms2(
                 filter: Some(
                     "OpenWRaw pseudo-MS2 projection of Waters TQ MRM transitions".to_owned(),
                 ),
-                retention_time_sec: function.scan_index[cycle_index].retention_time_min as f64
-                    * 60.0,
+                retention_time_sec: index_record.retention_time_min as f64 * 60.0,
                 total_ion_current: Some(tic),
                 base_peak_mz,
                 base_peak_intensity,
