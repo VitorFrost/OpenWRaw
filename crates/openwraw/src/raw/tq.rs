@@ -197,9 +197,9 @@ pub fn scan_byte_range(
     bytes_per_pair: usize,
     dat_size: u64,
 ) -> crate::Result<std::ops::Range<usize>> {
-    let rec = index.get(scan_index).ok_or_else(|| {
-        crate::Error::Parse(format!("TQ scan index {scan_index} out of range"))
-    })?;
+    let rec = index
+        .get(scan_index)
+        .ok_or_else(|| crate::Error::Parse(format!("TQ scan index {scan_index} out of range")))?;
     let start = rec.dat_offset as u64;
     let length = (rec.pair_count as u64)
         .checked_mul(bytes_per_pair as u64)
@@ -223,7 +223,10 @@ pub fn scan_byte_range(
 ///
 /// Unlike OpenWRaw's TOF Encoding A, this representation stores m/z directly;
 /// it has no per-scan TOF sentinel and needs no TOF flight-path geometry.
-pub fn decode_direct6(scan_bytes: &[u8], calibration: Option<&FunctionCal>) -> crate::Result<Spectrum> {
+pub fn decode_direct6(
+    scan_bytes: &[u8],
+    calibration: Option<&FunctionCal>,
+) -> crate::Result<Spectrum> {
     if scan_bytes.len() % 6 != 0 {
         return Err(crate::Error::Parse(format!(
             "TQ direct-6: scan size {} is not a multiple of 6",
@@ -278,7 +281,12 @@ mod tests {
     use super::*;
     use crate::raw::header::{CalType, FunctionCal};
 
-    fn direct6_record(mass_base: u32, mass_power_field: u32, intensity_base: i16, intensity_power: u32) -> [u8; 6] {
+    fn direct6_record(
+        mass_base: u32,
+        mass_power_field: u32,
+        intensity_base: i16,
+        intensity_power: u32,
+    ) -> [u8; 6] {
         let packed = (mass_base << 9) | ((mass_power_field & 0x1f) << 4) | (intensity_power & 0x0f);
         let mut record = [0_u8; 6];
         record[0..2].copy_from_slice(&intensity_base.to_le_bytes());
@@ -288,11 +296,26 @@ mod tests {
 
     #[test]
     fn classifies_tq_function_codes() {
-        assert_eq!(classify_function_type(0x09), (TqFunctionKind::Mrm, Some(TqPolarity::Positive)));
-        assert_eq!(classify_function_type(0x29), (TqFunctionKind::Mrm, Some(TqPolarity::Negative)));
-        assert_eq!(classify_function_type(0x0b), (TqFunctionKind::Q3Scan, Some(TqPolarity::Positive)));
-        assert_eq!(classify_function_type(0x2b), (TqFunctionKind::Q3Scan, Some(TqPolarity::Negative)));
-        assert_eq!(classify_function_type(0x55), (TqFunctionKind::Unknown(0x55), None));
+        assert_eq!(
+            classify_function_type(0x09),
+            (TqFunctionKind::Mrm, Some(TqPolarity::Positive))
+        );
+        assert_eq!(
+            classify_function_type(0x29),
+            (TqFunctionKind::Mrm, Some(TqPolarity::Negative))
+        );
+        assert_eq!(
+            classify_function_type(0x0b),
+            (TqFunctionKind::Q3Scan, Some(TqPolarity::Positive))
+        );
+        assert_eq!(
+            classify_function_type(0x2b),
+            (TqFunctionKind::Q3Scan, Some(TqPolarity::Negative))
+        );
+        assert_eq!(
+            classify_function_type(0x55),
+            (TqFunctionKind::Unknown(0x55), None)
+        );
     }
 
     #[test]
@@ -331,8 +354,18 @@ mod tests {
     #[test]
     fn infers_record_width_from_last_nonempty_scan() {
         let index = vec![
-            TqIndexRecord { dat_offset: 0, packed: 2, pair_count: 2, retention_time_min: 0.0 },
-            TqIndexRecord { dat_offset: 12, packed: 3, pair_count: 3, retention_time_min: 0.1 },
+            TqIndexRecord {
+                dat_offset: 0,
+                packed: 2,
+                pair_count: 2,
+                retention_time_min: 0.0,
+            },
+            TqIndexRecord {
+                dat_offset: 12,
+                packed: 3,
+                pair_count: 3,
+                retention_time_min: 0.1,
+            },
         ];
         assert_eq!(infer_bytes_per_pair(30, &index).unwrap(), 6);
     }
