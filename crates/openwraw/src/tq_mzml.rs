@@ -45,15 +45,12 @@ fn instrument_cv(name: &str) -> msc::CvTerm {
         .collect();
 
     if compact.starts_with("XEVOTQSMICRO") {
-        // PSI-MS MS:1002731 = Xevo TQ-S micro.
         return msc::CvTerm::new("MS:1002731", "Xevo TQ-S micro");
     }
     if compact.starts_with("XEVOTQS") {
-        // PSI-MS MS:1001792 = Xevo TQ-S.
         return msc::CvTerm::new("MS:1001792", "Xevo TQ-S");
     }
     if compact.starts_with("XEVOTQ") {
-        // PSI-MS MS:1001790 = Xevo TQ MS.
         return msc::CvTerm::new("MS:1001790", "Xevo TQ MS");
     }
     msc::CvTerm::new("MS:1000126", "Waters instrument model")
@@ -149,18 +146,16 @@ fn record_from_scan(
 
     let (ms_level, precursor, filter) = match mode {
         TqQ3MzmlMode::NativeMs2 => {
-            let target_mz = if scan.set_mass_da.is_finite() {
-                Some(scan.set_mass_da as f64)
-            } else {
-                None
-            };
+            let target_mz = (scan.set_mass_da.is_finite() && scan.set_mass_da > 0.0)
+                .then_some(scan.set_mass_da as f64);
+            let precursor = target_mz.map(|target_mz| msc::PrecursorInfo {
+                target_mz: Some(target_mz),
+                analyzer: Some(msc::Analyzer::TQMS),
+                ..Default::default()
+            });
             (
                 2,
-                Some(msc::PrecursorInfo {
-                    target_mz,
-                    analyzer: Some(msc::Analyzer::TQMS),
-                    ..Default::default()
-                }),
+                precursor,
                 Some("Waters TQ broad Q3 scan (native MS2 semantics)".to_owned()),
             )
         }
@@ -230,12 +225,11 @@ impl msc::SpectrumSource for TqQ3Source {
     fn iter_spectra<'s>(&'s mut self) -> Box<dyn Iterator<Item = msc::SpectrumRecord> + 's> {
         let reader = &self.reader;
         let mode = self.mode;
-        let mut scan_counter = 0_u32;
+        let mut emitted_count = 0_u32;
         Box::new(reader.iter_scans().filter_map(move |decoded| {
-            scan_counter += 1;
-            decoded
-                .ok()
-                .map(|scan| record_from_scan(mode, scan_counter, scan))
+            let scan = decoded.ok()?;
+            emitted_count += 1;
+            Some(record_from_scan(mode, emitted_count, scan))
         }))
     }
 
@@ -302,6 +296,14 @@ mod tests {
         assert_eq!(record.analyzer, Some(msc::Analyzer::TQMS));
         assert_eq!(record.polarity, Some(msc::Polarity::Negative));
         assert_eq!(record.precursor.unwrap().target_mz, Some(40.0));
+    }
+
+    #[test]
+    fn native_mode_does_not_emit_zero_as_a_precursor_mass() {
+        let mut scan = synthetic_scan();
+        scan.set_mass_da = 0.0;
+        let record = record_from_scan(TqQ3MzmlMode::NativeMs2, 1, scan);
+        assert!(record.precursor.is_none());
     }
 
     #[test]
