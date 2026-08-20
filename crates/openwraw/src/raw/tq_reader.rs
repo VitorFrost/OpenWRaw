@@ -273,9 +273,7 @@ mod tests {
         intensity_base: i16,
         intensity_power: u32,
     ) -> [u8; 6] {
-        let packed = (mass_base << 9)
-            | ((mass_power_field & 0x1f) << 4)
-            | (intensity_power & 0x0f);
+        let packed = (mass_base << 9) | ((mass_power_field & 0x1f) << 4) | (intensity_power & 0x0f);
         let mut record = [0_u8; 6];
         record[0..2].copy_from_slice(&intensity_base.to_le_bytes());
         record[2..6].copy_from_slice(&packed.to_le_bytes());
