@@ -41,9 +41,13 @@ fn mrm_record(index: usize, trace: TqMrmChromatogram) -> msc::ChromatogramRecord
 /// Spectrum/chromatogram source for a mixed TQ acquisition.
 pub struct TqMixedSource {
     q3: TqQ3Source,
-    mrm: TqMrmReader,
     mrm_traces: Vec<TqMrmChromatogram>,
     mrm_spectrum_mode: TqMrmSpectrumMode,
+    /// Precomputed only when the optional pseudo-MS2 compatibility projection
+    /// is requested. Keeping it here makes conversion errors fail `open`
+    /// instead of being silently discarded during iteration, and gives the
+    /// mzML writer an exact `spectrumList` count.
+    mrm_spectra: Vec<msc::SpectrumRecord>,
 }
 
 impl TqMixedSource {
@@ -68,11 +72,17 @@ impl TqMixedSource {
         let q3 = TqQ3Source::open(dir, q3_mode)?;
         let mrm = TqMrmReader::open(dir)?;
         let mrm_traces = mrm.chromatograms()?;
+        let q3_count = q3.spectrum_count_hint().unwrap_or(0);
+        let mrm_spectra = match mrm_spectrum_mode {
+            TqMrmSpectrumMode::None => Vec::new(),
+            TqMrmSpectrumMode::PseudoMs2 => pseudo_ms2_records(&mrm, q3_count)?,
+        };
+
         Ok(Self {
             q3,
-            mrm,
             mrm_traces,
             mrm_spectrum_mode,
+            mrm_spectra,
         })
     }
 
@@ -87,6 +97,10 @@ impl TqMixedSource {
     pub fn mrm_chromatogram_count(&self) -> usize {
         self.mrm_traces.len()
     }
+
+    pub fn mrm_spectrum_count(&self) -> usize {
+        self.mrm_spectra.len()
+    }
 }
 
 impl SpectrumSource for TqMixedSource {
@@ -95,27 +109,21 @@ impl SpectrumSource for TqMixedSource {
     }
 
     fn iter_spectra<'s>(&'s mut self) -> Box<dyn Iterator<Item = msc::SpectrumRecord> + 's> {
-        match self.mrm_spectrum_mode {
-            TqMrmSpectrumMode::None => self.q3.iter_spectra(),
-            TqMrmSpectrumMode::PseudoMs2 => {
-                let q3_count = self.q3.spectrum_count_hint().unwrap_or(0);
-                // The canonical MRM decode already succeeded in `open`; if an
-                // optional compatibility projection still fails, omit only that
-                // projection rather than losing the native Q3 spectrum stream.
-                let mrm_records = pseudo_ms2_records(&self.mrm, q3_count).unwrap_or_default();
-                let q3_iter = self.q3.iter_spectra();
-                Box::new(q3_iter.chain(mrm_records))
-            }
+        let q3_iter = self.q3.iter_spectra();
+        if self.mrm_spectra.is_empty() {
+            q3_iter
+        } else {
+            Box::new(q3_iter.chain(self.mrm_spectra.clone()))
         }
     }
 
     fn spectrum_count_hint(&self) -> Option<usize> {
-        match self.mrm_spectrum_mode {
-            TqMrmSpectrumMode::None => self.q3.spectrum_count_hint(),
-            // Let the mzML writer derive/patch the final count when optional
-            // Q1 grouping can produce more than one pseudo-MS2 per cycle.
-            TqMrmSpectrumMode::PseudoMs2 => None,
-        }
+        Some(
+            self.q3
+                .spectrum_count_hint()
+                .unwrap_or(0)
+                .saturating_add(self.mrm_spectra.len()),
+        )
     }
 
     fn iter_chromatograms<'s>(
