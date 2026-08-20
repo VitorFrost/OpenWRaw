@@ -3,6 +3,7 @@ use openwraw::raw::tq::{TqPolarity, FUNCTION_RECORD_SIZE};
 use openwraw::raw::tq_mrm::TqMrmReader;
 use openwraw::raw::tq_reader::TqReader;
 use openwraw::tq_mixed_mzml::{write_tq_mixed_mzml, TqMixedSource};
+use openwraw::tq_mrm_spectra::TqMrmSpectrumMode;
 use openwraw::tq_mzml::TqQ3MzmlMode;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,7 +82,7 @@ $$ Cal Function 2: 0.0,1.0,T0\r\n",
     mrm_dat.extend_from_slice(&packed_mrm_value(13, 1024)); // 8
     fs::write(dir.join("_FUNC001.DAT"), mrm_dat).unwrap();
 
-    // Q3: one direct-6 profile scan with two points.
+    // Q3: one direct-6 profile scan at 15 s, between the two MRM cycles.
     let q3_idx = idx_record(0, 0x1800_0000, 2, 0.25);
     fs::write(dir.join("_FUNC002.IDX"), q3_idx).unwrap();
     let mut q3_dat = Vec::new();
@@ -136,6 +137,36 @@ fn mixed_source_emits_q3_spectrum_and_srm_chromatograms() {
         assert!(chromatogram.precursor_mz.is_some());
         assert!(chromatogram.product_mz.is_some());
     }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mixed_pseudo_spectra_follow_acquisition_time_order() {
+    let dir = temp_bundle("tq-mixed-chronology");
+    write_synthetic_mixed_bundle(&dir);
+
+    let mut source = TqMixedSource::open_with_mrm_spectra(
+        &dir,
+        TqQ3MzmlMode::PseudoMs1,
+        TqMrmSpectrumMode::PseudoMs2,
+    )
+    .unwrap();
+    let spectra: Vec<_> = source.iter_spectra().collect();
+
+    // Both MRM transitions share one Q1, so each MRM cycle becomes one
+    // pseudo-MS2 spectrum: 0 s MRM -> 15 s Q3 -> 30 s MRM.
+    assert_eq!(spectra.len(), 3);
+    assert_eq!(spectra[0].retention_time_sec, 0.0);
+    assert_eq!(spectra[0].ms_level, 2);
+    assert_eq!(spectra[1].retention_time_sec, 15.0);
+    assert_eq!(spectra[1].ms_level, 1);
+    assert_eq!(spectra[2].retention_time_sec, 30.0);
+    assert_eq!(spectra[2].ms_level, 2);
+    assert_eq!(
+        spectra.iter().map(|record| record.index).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
