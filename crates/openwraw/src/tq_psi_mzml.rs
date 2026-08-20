@@ -3,16 +3,20 @@
 //! `openmassspec-core` 1.5.0 provides the generic mzML serializer used by the
 //! established OpenWRaw readers. The TQ path needs a few stricter semantics
 //! that are not yet expressible through that public API (dynamic fileContent,
-//! a source-bundle checksum, generic/unknown dissociation, and corrected units).
+//! a source-bundle checksum, generic/unknown dissociation, corrected units,
+//! and independent observed-vs-declared Q3 mass ranges).
 //! Rather than changing legacy output, TQ conversion serializes plain mzML to
 //! memory, applies deterministic PSI corrections, and (when requested) builds
 //! a fresh indexed-mzML wrapper from the corrected bytes.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use openmassspec_core as msc;
+
+use crate::raw::tq_reader::TqReader;
 
 /// Serialize a TQ source as PSI-corrected, non-indexed mzML.
 pub fn write_tq_psi_mzml<S: msc::SpectrumSource + ?Sized, P: AsRef<Path>, W: Write>(
@@ -55,10 +59,17 @@ fn corrected_plain_mzml<S: msc::SpectrumSource + ?Sized>(
     let xml = String::from_utf8(raw)
         .map_err(|err| crate::Error::Parse(format!("TQ mzML writer emitted non-UTF-8 XML: {err}")))?;
     let source_sha1 = deterministic_bundle_sha1(source_dir)?;
-    apply_psi_corrections(xml, &source_sha1)
+    let scan_windows = q3_scan_windows(source_dir)?;
+    apply_psi_corrections(xml, &source_sha1, &scan_windows)
 }
 
-fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<String> {
+fn apply_psi_corrections(
+    mut xml: String,
+    source_sha1: &str,
+    scan_windows: &BTreeMap<String, (f64, f64)>,
+) -> crate::Result<String> {
+    // fileContent must describe what is actually present in spectrumList,
+    // rather than unconditionally advertising both MS1 and MSn.
     let spectrum_body = xml
         .split_once("<spectrumList")
         .map(|(_, body)| body)
@@ -88,6 +99,9 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
     }
     xml = xml.replacen(old_file_content, &new_file_content, 1);
 
+    // Waters RAW is a directory bundle. The checksum convention is made
+    // explicit so the SHA-1 is reproducible and not confused with a vendor
+    // definition for hashing a directory object.
     let source_close = "      </sourceFile>";
     let source_insert = format!(
         concat!(
@@ -105,6 +119,10 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
     }
     xml = xml.replacen(source_close, &source_insert, 1);
 
+    // An MS2 precursor activation group must carry the dissociation-method
+    // parent term or one of its children. When TQ method metadata has not yet
+    // identified a specific mechanism, use the generic parent rather than
+    // inventing CID.
     xml = xml.replace(
         "            <activation>\n            </activation>",
         concat!(
@@ -114,11 +132,15 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
         ),
     );
 
+    // openmassspec-core 1.5.0 hardcodes CID on SRM chromatograms. Until .EE
+    // method metadata is exposed, downgrade that assertion to the generic
+    // dissociation-method term.
     xml = xml.replace(
         "<cvParam cvRef=\"MS\" accession=\"MS:1000133\" name=\"collision-induced dissociation\" value=\"\"/>",
         "<cvParam cvRef=\"MS\" accession=\"MS:1000044\" name=\"dissociation method\" value=\"\"/>",
     );
 
+    // PSI units for spectrum-level mass/intensity attributes.
     xml = xml.replace(
         "name=\"base peak m/z\" value=\"",
         "name=\"base peak m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"",
@@ -135,12 +157,97 @@ fn apply_psi_corrections(mut xml: String, source_sha1: &str) -> crate::Result<St
         "name=\"highest observed m/z\" value=\"",
         "name=\"highest observed m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"",
     );
+
+    // Intensity arrays (spectra and chromatograms) should identify their unit.
     xml = xml.replace(
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/>",
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>",
     );
 
+    // The generic serializer uses lowest/highest *observed* m/z as the scan
+    // window. Q3 descriptors carry the programmed acquisition bounds
+    // separately, so repair only scanWindow while leaving observed terms
+    // untouched.
+    apply_scan_window_overrides(&mut xml, scan_windows)?;
+
     Ok(xml)
+}
+
+fn q3_scan_windows(dir: &Path) -> crate::Result<BTreeMap<String, (f64, f64)>> {
+    let reader = TqReader::open(dir)?;
+    let mut windows = BTreeMap::new();
+    for function in &reader.q3_functions {
+        let low = function.descriptor.mz_low as f64;
+        let high = function.descriptor.mz_high as f64;
+        if !low.is_finite() || !high.is_finite() || low <= 0.0 || high <= low {
+            continue;
+        }
+        for scan_index in 0..function.scan_count() {
+            windows.insert(
+                format!(
+                    "function={} process=0 scan={}",
+                    function.index,
+                    scan_index + 1
+                ),
+                (low, high),
+            );
+        }
+    }
+    Ok(windows)
+}
+
+fn apply_scan_window_overrides(
+    xml: &mut String,
+    scan_windows: &BTreeMap<String, (f64, f64)>,
+) -> crate::Result<()> {
+    for (native_id, &(low, high)) in scan_windows {
+        let marker = format!("<spectrum id=\"{native_id}\"");
+        let Some(start) = xml.find(&marker) else {
+            // A source adapter is allowed to omit an undecodable spectrum.
+            // Its static RAW descriptor may therefore have no emitted XML
+            // counterpart; this is not an error.
+            continue;
+        };
+        let relative_end = xml[start..].find("</spectrum>").ok_or_else(|| {
+            crate::Error::Parse(format!(
+                "TQ mzML PSI correction: unterminated spectrum {native_id}"
+            ))
+        })?;
+        let end = start + relative_end + "</spectrum>".len();
+        let mut spectrum = xml[start..end].to_owned();
+        spectrum = replace_cv_value(&spectrum, "MS:1000501", low)?;
+        spectrum = replace_cv_value(&spectrum, "MS:1000500", high)?;
+        xml.replace_range(start..end, &spectrum);
+    }
+    Ok(())
+}
+
+fn replace_cv_value(text: &str, accession: &str, value: f64) -> crate::Result<String> {
+    let accession_marker = format!("accession=\"{accession}\"");
+    let accession_start = text.find(&accession_marker).ok_or_else(|| {
+        crate::Error::Parse(format!(
+            "TQ mzML PSI correction: spectrum lacks {accession} scan-window term"
+        ))
+    })?;
+    let tail = &text[accession_start..];
+    let relative_value = tail.find("value=\"").ok_or_else(|| {
+        crate::Error::Parse(format!(
+            "TQ mzML PSI correction: {accession} term lacks a value attribute"
+        ))
+    })?;
+    let value_start = accession_start + relative_value + "value=\"".len();
+    let value_end = text[value_start..]
+        .find('"')
+        .map(|offset| value_start + offset)
+        .ok_or_else(|| {
+            crate::Error::Parse(format!(
+                "TQ mzML PSI correction: {accession} value is unterminated"
+            ))
+        })?;
+
+    let mut corrected = text.to_owned();
+    corrected.replace_range(value_start..value_end, &format!("{value:.6}"));
+    Ok(corrected)
 }
 
 fn build_indexed_mzml(plain: &str) -> crate::Result<Vec<u8>> {
@@ -425,13 +532,37 @@ mod tests {
             "<binaryDataArray><cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/></binaryDataArray>",
             "</spectrum></spectrumList>"
         );
-        let fixed = apply_psi_corrections(xml.to_owned(), "deadbeef").unwrap();
+        let fixed = apply_psi_corrections(xml.to_owned(), "deadbeef", &BTreeMap::new()).unwrap();
         let header = fixed.split("<spectrumList").next().unwrap();
         assert!(header.contains("MS:1000579"));
         assert!(!header.contains("MS:1000580"));
         assert!(fixed.contains("unitAccession=\"MS:1000040\""));
         assert!(fixed.contains("unitAccession=\"MS:1000131\""));
         assert!(fixed.contains("MS:1000569"));
+    }
+
+    #[test]
+    fn declared_scan_window_replaces_only_scan_window_values() {
+        let mut xml = concat!(
+            "<spectrum id=\"function=2 process=0 scan=1\">",
+            "<cvParam accession=\"MS:1000528\" name=\"lowest observed m/z\" value=\"100.000000\"/>",
+            "<cvParam accession=\"MS:1000527\" name=\"highest observed m/z\" value=\"200.000000\"/>",
+            "<scanWindow>",
+            "<cvParam accession=\"MS:1000501\" name=\"scan window lower limit\" value=\"100.000000\"/>",
+            "<cvParam accession=\"MS:1000500\" name=\"scan window upper limit\" value=\"200.000000\"/>",
+            "</scanWindow></spectrum>"
+        )
+        .to_owned();
+        let mut windows = BTreeMap::new();
+        windows.insert(
+            "function=2 process=0 scan=1".to_owned(),
+            (75.0, 900.0),
+        );
+        apply_scan_window_overrides(&mut xml, &windows).unwrap();
+        assert!(xml.contains("lowest observed m/z\" value=\"100.000000\""));
+        assert!(xml.contains("highest observed m/z\" value=\"200.000000\""));
+        assert!(xml.contains("scan window lower limit\" value=\"75.000000\""));
+        assert!(xml.contains("scan window upper limit\" value=\"900.000000\""));
     }
 
     #[test]
