@@ -102,6 +102,7 @@ impl TqMrmReader {
                 )));
             }
 
+            validate_mrm_layout(index, &scan_index, bytes_per_pair, dat_size)?;
             let transition_count = consistent_transition_count(index, &scan_index)?;
             let transitions = transitions_from_descriptor(&descriptor, transition_count)?;
 
@@ -141,6 +142,11 @@ impl TqMrmReader {
             let mut times = Vec::with_capacity(function.cycle_count());
 
             for cycle_index in 0..function.cycle_count() {
+                let index_record = &function.scan_index[cycle_index];
+                if index_record.pair_count == 0 {
+                    continue;
+                }
+
                 let range = scan_byte_range(
                     &function.scan_index,
                     cycle_index,
@@ -158,7 +164,7 @@ impl TqMrmReader {
                     )));
                 }
 
-                times.push(function.scan_index[cycle_index].retention_time_min * 60.0);
+                times.push(index_record.retention_time_min * 60.0);
                 for (trace, value) in traces.iter_mut().zip(values) {
                     trace.push(value);
                 }
@@ -181,6 +187,35 @@ impl TqMrmReader {
     }
 }
 
+fn validate_mrm_layout(
+    function_index: u32,
+    scan_index: &[TqIndexRecord],
+    bytes_per_pair: usize,
+    dat_size: u64,
+) -> crate::Result<()> {
+    for (cycle_index, record) in scan_index.iter().enumerate() {
+        if !record.retention_time_min.is_finite() || record.retention_time_min < 0.0 {
+            return Err(crate::Error::Parse(format!(
+                "TQ MRM reader: function {function_index} cycle {} has invalid retention time {}",
+                cycle_index + 1,
+                record.retention_time_min
+            )));
+        }
+
+        let range = scan_byte_range(scan_index, cycle_index, bytes_per_pair, dat_size)?;
+        if let Some(next) = scan_index.get(cycle_index + 1) {
+            let next_offset = next.dat_offset as usize;
+            if next_offset < range.end {
+                return Err(crate::Error::Parse(format!(
+                    "TQ MRM reader: function {function_index} cycle {} overlaps the next DAT range",
+                    cycle_index + 1
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn consistent_transition_count(
     function_index: u32,
     scan_index: &[TqIndexRecord],
@@ -192,7 +227,7 @@ fn consistent_transition_count(
             Some(previous) if previous == record.pair_count => {}
             Some(previous) => {
                 return Err(crate::Error::Parse(format!(
-                    "TQ MRM reader: function {function_index} changes transition count from {previous} to {} across cycles",
+                    "TQ MRM reader: function {function_index} changes transition count from {previous} to {} across cycles; scheduled/variable-channel MRM is not yet supported",
                     record.pair_count
                 )));
             }
@@ -304,6 +339,16 @@ mod tests {
         assert_eq!(transitions[0].precursor_mz, 300.0);
         assert_eq!(transitions[0].product_mz, 100.0);
         assert_eq!(transitions[1].product_mz, 150.0);
+    }
+
+    #[test]
+    fn ignores_zero_pair_cycles_when_checking_transition_count() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&idx_record(0, 2, 0.0));
+        bytes.extend_from_slice(&idx_record(8, 0, 0.1));
+        bytes.extend_from_slice(&idx_record(8, 2, 0.2));
+        let index = parse_idx22(&bytes).unwrap();
+        assert_eq!(consistent_transition_count(1, &index).unwrap(), 2);
     }
 
     #[test]
