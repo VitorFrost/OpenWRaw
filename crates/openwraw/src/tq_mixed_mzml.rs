@@ -118,8 +118,13 @@ impl SpectrumSource for TqMixedSource {
             return self.q3.iter_spectra();
         }
 
+        // Clone the optional compatibility stream before borrowing `q3` for
+        // the lifetime of its iterator. This keeps the two field borrows
+        // unambiguous for the Rust borrow checker and makes the merge logic
+        // independent of field evaluation order.
+        let mrm_records = self.mrm_spectra.clone();
         let mut q3 = self.q3.iter_spectra().peekable();
-        let mut mrm = self.mrm_spectra.clone().into_iter().peekable();
+        let mut mrm = mrm_records.into_iter().peekable();
         let mut output_index = 0_usize;
 
         Box::new(std::iter::from_fn(move || {
