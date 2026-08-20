@@ -6,6 +6,7 @@ pub mod reader;
 pub mod tq_mixed_mzml;
 pub mod tq_mrm_spectra;
 pub mod tq_mzml;
+pub mod tq_psi_mzml;
 
 pub(crate) mod bytes;
 
