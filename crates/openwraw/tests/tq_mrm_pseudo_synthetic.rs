@@ -1,4 +1,5 @@
 use openmassspec_core::conformance::assert_source_invariants;
+use openmassspec_core::SpectrumSource;
 use openwraw::raw::tq::FUNCTION_RECORD_SIZE;
 use openwraw::raw::tq_mrm::TqMrmReader;
 use openwraw::tq_mixed_mzml::TqMixedSource;
@@ -7,8 +8,11 @@ use openwraw::tq_mzml::TqQ3MzmlMode;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn temp_bundle() -> PathBuf {
-    std::env::temp_dir().join(format!("openwraw-tq-mrm-pseudo-{}", std::process::id()))
+fn temp_bundle(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "openwraw-tq-mrm-pseudo-{name}-{}",
+        std::process::id()
+    ))
 }
 
 fn idx_record(offset: u32, count: u32, rt_min: f32) -> [u8; 22] {
@@ -60,7 +64,7 @@ fn write_bundle(dir: &Path) {
 
 #[test]
 fn pseudo_ms2_groups_by_q1_sorts_q3_and_preserves_signal_pairing() {
-    let dir = temp_bundle();
+    let dir = temp_bundle("grouping");
     write_bundle(&dir);
 
     let reader = TqMrmReader::open(&dir).unwrap();
@@ -103,7 +107,7 @@ fn pseudo_ms2_groups_by_q1_sorts_q3_and_preserves_signal_pairing() {
 
 #[test]
 fn pseudo_ms2_mixed_source_satisfies_openmassspec_conformance_contract() {
-    let dir = temp_bundle();
+    let dir = temp_bundle("conformance");
     write_bundle(&dir);
 
     // This synthetic bundle intentionally has no Q3 function, so the mixed
@@ -115,6 +119,8 @@ fn pseudo_ms2_mixed_source_satisfies_openmassspec_conformance_contract() {
     )
     .unwrap();
 
+    assert_eq!(source.spectrum_count_hint(), Some(4));
+    assert_eq!(source.mrm_spectrum_count(), 4);
     let count = assert_source_invariants(&mut source).unwrap();
     assert_eq!(count, 4);
 
