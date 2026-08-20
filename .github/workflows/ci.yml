@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/tq-lowres-q3]
   pull_request:
     branches: [main]
 
@@ -198,4 +198,3 @@ jobs:
         run: bun install --frozen-lockfile
       - name: bun run build:cloudflare
         run: bun run build:cloudflare
-
