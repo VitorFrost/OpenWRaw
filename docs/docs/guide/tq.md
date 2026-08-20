@@ -23,13 +23,15 @@ mzML
 
 MRM chromatograms use PSI-MS `MS:1001473` (`selected reaction monitoring chromatogram`) and carry explicit precursor and product m/z values.
 
+Broad Q3 functions are merged by retention time rather than emitted as separate function-sized blocks. This preserves acquisition chronology in polarity-switching or otherwise interleaved runs while each spectrum retains its original Waters function/scan native ID.
+
 ## Q3 semantics
 
 Waters triple-quadrupole broad scans may be recorded as MS2/Q3 scans even when the resulting broad mass spectrum is intended for untargeted downstream processing. OpenWRaw therefore requires an explicit choice rather than silently changing the MS level.
 
 ### `native-ms2`
 
-Preserves the vendor acquisition semantics. Broad Q3 scans remain MS2 and retain the function-level precursor/set-mass context.
+Preserves the vendor acquisition semantics. Broad Q3 scans remain MS2 and retain valid non-zero function-level precursor/set-mass context when present.
 
 Use this for archival conversion and format-faithful interchange.
 
@@ -47,12 +49,14 @@ For spectrum-oriented downstream software, the mixed converter can **add** an ex
 
 - transitions are grouped by Q1 precursor mass for each acquisition cycle;
 - each Q1 group becomes one sparse MS2 spectrum;
-- Q3 product masses form the m/z array;
+- Q3 product masses form the m/z array and are sorted while retaining their paired intensities;
 - transition signals form the intensity array;
 - Q1 is written as the precursor/selected m/z;
 - the spectrum filter metadata explicitly identifies the record as an OpenWRaw pseudo-MS2 projection.
 
 This option is additive. The original SRM chromatograms remain in `chromatogramList`, so the compatibility projection does not replace or destroy the canonical targeted representation.
+
+When pseudo-MS2 compatibility records are enabled, they are merged with broad Q3 spectra by retention time and the final spectrum indices are reassigned contiguously after that merge.
 
 When enabled, the mixed structure becomes:
 
@@ -192,5 +196,9 @@ Private data may be used locally to verify that a generic decoder behaves correc
 ## Current limitations
 
 The mixed converter currently focuses on the information required for structurally correct Q3 spectra and MRM chromatograms. Additional Waters side-file metadata such as compound labels and per-transition method parameters can be exposed later once their API and mzML representation are defined cleanly.
+
+MRM functions are currently required to have a constant non-zero transition count across their populated acquisition cycles. Zero-point cycles are skipped. Scheduled/dynamic MRM functions that change the active transition count within one function are rejected rather than guessed, because the current format model does not yet establish an unambiguous per-cycle mapping from the changing DAT channel set back to the 32 Q1/Q3 descriptor slots.
+
+The current MRM transition model also assumes the active Q1/Q3 descriptor entries occupy the leading transition slots. This is validated for the format family used to develop the reader but has not yet been generalized to sparse/non-contiguous descriptor-slot schedules.
 
 The legacy QTOF/IMS `Reader::open` path is intentionally unchanged. TQ support currently uses the dedicated TQ readers and conversion functions documented above.
