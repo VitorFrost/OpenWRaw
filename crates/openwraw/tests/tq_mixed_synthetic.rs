@@ -2,7 +2,9 @@ use openmassspec_core::SpectrumSource;
 use openwraw::raw::tq::{TqPolarity, FUNCTION_RECORD_SIZE};
 use openwraw::raw::tq_mrm::TqMrmReader;
 use openwraw::raw::tq_reader::TqReader;
-use openwraw::tq_mixed_mzml::{write_tq_mixed_mzml, TqMixedSource};
+use openwraw::tq_mixed_mzml::{
+    write_tq_mixed_indexed_mzml, write_tq_mixed_mzml, TqMixedSource,
+};
 use openwraw::tq_mrm_spectra::TqMrmSpectrumMode;
 use openwraw::tq_mzml::TqQ3MzmlMode;
 use std::fs;
@@ -53,14 +55,12 @@ $$ Cal Function 2: 0.0,1.0,T0\r\n",
 
     let mut functions = vec![0_u8; FUNCTION_RECORD_SIZE * 2];
 
-    // Function 1: positive MRM with two synthetic transitions.
     functions[0] = 0x09;
     functions[0x0a0..0x0a4].copy_from_slice(&300.0_f32.to_le_bytes());
     functions[0x0a4..0x0a8].copy_from_slice(&300.0_f32.to_le_bytes());
     functions[0x120..0x124].copy_from_slice(&100.0_f32.to_le_bytes());
     functions[0x124..0x128].copy_from_slice(&150.0_f32.to_le_bytes());
 
-    // Function 2: negative broad Q3 scan.
     let f2 = FUNCTION_RECORD_SIZE;
     functions[f2] = 0x2b;
     functions[f2 + 0x018..f2 + 0x01c].copy_from_slice(&40.0_f32.to_le_bytes());
@@ -69,20 +69,18 @@ $$ Cal Function 2: 0.0,1.0,T0\r\n",
     functions[f2 + 0x120..f2 + 0x124].copy_from_slice(&900.0_f32.to_le_bytes());
     fs::write(dir.join("_FUNCTNS.INF"), functions).unwrap();
 
-    // MRM: two cycles, two channels per cycle.
     let mut mrm_idx = Vec::new();
     mrm_idx.extend_from_slice(&idx_record(0, 0x0800_0000, 2, 0.0));
     mrm_idx.extend_from_slice(&idx_record(8, 0x0800_0000, 2, 0.5));
     fs::write(dir.join("_FUNC001.IDX"), mrm_idx).unwrap();
 
     let mut mrm_dat = Vec::new();
-    mrm_dat.extend_from_slice(&packed_mrm_value(10, 1024)); // 1
-    mrm_dat.extend_from_slice(&packed_mrm_value(11, 1024)); // 2
-    mrm_dat.extend_from_slice(&packed_mrm_value(12, 1024)); // 4
-    mrm_dat.extend_from_slice(&packed_mrm_value(13, 1024)); // 8
+    mrm_dat.extend_from_slice(&packed_mrm_value(10, 1024));
+    mrm_dat.extend_from_slice(&packed_mrm_value(11, 1024));
+    mrm_dat.extend_from_slice(&packed_mrm_value(12, 1024));
+    mrm_dat.extend_from_slice(&packed_mrm_value(13, 1024));
     fs::write(dir.join("_FUNC001.DAT"), mrm_dat).unwrap();
 
-    // Q3: one direct-6 profile scan at 15 s, between the two MRM cycles.
     let q3_idx = idx_record(0, 0x1800_0000, 2, 0.25);
     fs::write(dir.join("_FUNC002.IDX"), q3_idx).unwrap();
     let mut q3_dat = Vec::new();
@@ -128,6 +126,14 @@ fn mixed_source_emits_q3_spectrum_and_srm_chromatograms() {
     assert_eq!(spectra.len(), 1);
     assert_eq!(spectra[0].ms_level, 1);
     assert_eq!(spectra[0].polarity, Some(openmassspec_core::Polarity::Negative));
+    assert!(spectra[0].filter.is_none());
+    assert_eq!(
+        spectra[0]
+            .extra
+            .get("openwraw.projection")
+            .map(String::as_str),
+        Some("pseudo-ms1-from-q3")
+    );
 
     let chromatograms: Vec<_> = source.iter_chromatograms().collect();
     assert_eq!(chromatograms.len(), 2);
@@ -154,8 +160,6 @@ fn mixed_pseudo_spectra_follow_acquisition_time_order() {
     .unwrap();
     let spectra: Vec<_> = source.iter_spectra().collect();
 
-    // Both MRM transitions share one Q1, so each MRM cycle becomes one
-    // pseudo-MS2 spectrum: 0 s MRM -> 15 s Q3 -> 30 s MRM.
     assert_eq!(spectra.len(), 3);
     assert_eq!(spectra[0].retention_time_sec, 0.0);
     assert_eq!(spectra[0].ms_level, 2);
@@ -172,7 +176,7 @@ fn mixed_pseudo_spectra_follow_acquisition_time_order() {
 }
 
 #[test]
-fn mixed_mzml_contains_spectrum_and_chromatogram_lists() {
+fn mixed_mzml_applies_psi_semantic_corrections() {
     let dir = temp_bundle("tq-mixed-mzml");
     write_synthetic_mixed_bundle(&dir);
 
@@ -183,6 +187,59 @@ fn mixed_mzml_contains_spectrum_and_chromatogram_lists() {
     assert!(xml.contains("<spectrumList"));
     assert!(xml.contains("<chromatogramList"));
     assert!(xml.contains("selected reaction monitoring chromatogram"));
+    assert!(xml.contains("accession=\"MS:1000569\" name=\"SHA-1\""));
+    assert!(xml.contains("OpenWRaw Waters RAW bundle checksum convention"));
+    assert!(xml.contains("name=\"dissociation method\""));
+    assert!(!xml.contains("name=\"collision-induced dissociation\""));
+    assert!(!xml.contains("name=\"filter string\""));
+    assert!(xml.contains("name=\"openwraw.projection\" value=\"pseudo-ms1-from-q3\""));
+    assert!(xml.contains(
+        "name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\""
+    ));
+    assert!(xml.contains(
+        "name=\"base peak m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\""
+    ));
+
+    let file_content = xml
+        .split_once("<fileContent>")
+        .unwrap()
+        .1
+        .split_once("</fileContent>")
+        .unwrap()
+        .0;
+    assert!(file_content.contains("MS:1000579"));
+    assert!(!file_content.contains("MS:1000580"));
+
+    assert!(xml.contains("<instrumentConfigurationList count=\"1\">"));
+    assert!(!xml.contains("accession=\"MS:1000081\" name=\"quadrupole\""));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn corrected_indexed_mzml_rebuilds_offsets_after_semantic_changes() {
+    let dir = temp_bundle("tq-mixed-indexed");
+    write_synthetic_mixed_bundle(&dir);
+
+    let mut output = Vec::new();
+    write_tq_mixed_indexed_mzml(&dir, &mut output, TqQ3MzmlMode::PseudoMs1).unwrap();
+    let xml = String::from_utf8(output).unwrap();
+
+    let offset_start = xml.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
+    let offset_end = xml[offset_start..].find('<').unwrap() + offset_start;
+    let index_offset: usize = xml[offset_start..offset_end].parse().unwrap();
+    assert!(xml[index_offset..].starts_with("<indexList"));
+
+    let spectrum_tag = xml.find("<spectrum id=").unwrap();
+    let offset_marker = "<offset idRef=\"function=2 process=0 scan=1\">";
+    let value_start = xml.find(offset_marker).unwrap() + offset_marker.len();
+    let value_end = xml[value_start..].find('<').unwrap() + value_start;
+    let indexed_spectrum_offset: usize = xml[value_start..value_end].parse().unwrap();
+    assert_eq!(indexed_spectrum_offset, spectrum_tag);
+
+    let checksum_start = xml.find("<fileChecksum>").unwrap() + "<fileChecksum>".len();
+    let checksum_end = xml[checksum_start..].find('<').unwrap() + checksum_start;
+    assert_eq!(xml[checksum_start..checksum_end].len(), 40);
 
     let _ = fs::remove_dir_all(&dir);
 }
