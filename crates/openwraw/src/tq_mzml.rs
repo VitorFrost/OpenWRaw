@@ -5,9 +5,10 @@
 //! - [`TqQ3MzmlMode::PseudoMs1`] intentionally projects the same broad spectrum to
 //!   MS1 for untargeted-processing tools that require an MS1 survey stream.
 //!
-//! The pseudo-MS1 path is opt-in and is labeled in the spectrum filter string;
-//! it must not be confused with native MS1 acquisition.
+//! Projection provenance is stored as an OpenWRaw `userParam`, not as the
+//! Thermo-specific PSI `filter string` term.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
@@ -15,6 +16,7 @@ use openmassspec_core as msc;
 
 use crate::raw::tq::TqPolarity;
 use crate::raw::tq_reader::{TqDecodedQ3Scan, TqReader};
+use crate::tq_psi_mzml::{write_tq_psi_indexed_mzml, write_tq_psi_mzml};
 
 const SOFTWARE_NAME: &str = "openwraw";
 const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,7 +89,7 @@ fn run_metadata_for(reader: &TqReader) -> msc::RunMetadata {
         .unwrap_or_else(|| "Waters".to_owned());
 
     msc::RunMetadata {
-        extra: ::std::collections::BTreeMap::new(),
+        extra: BTreeMap::new(),
         source_file_name: bundle_name(reader),
         source_file_format: source_file_format_cv(),
         native_id_format: native_id_format_cv(),
@@ -99,7 +101,12 @@ fn run_metadata_for(reader: &TqReader) -> msc::RunMetadata {
         acquisition_software_version: None,
         start_timestamp: None,
         mobility_array_kind: None,
-        analyzers: vec![msc::Analyzer::TQMS],
+        // openmassspec-core 1.5 models analyzers as additional instrument
+        // configurations rather than componentList/analyzer children. Keep
+        // the accurately identified Xevo model and avoid emitting a
+        // structurally misplaced quadrupole term until core exposes proper
+        // instrument-component metadata.
+        analyzers: Vec::new(),
     }
 }
 
@@ -144,7 +151,7 @@ fn record_from_scan(
     let (tic, base_peak_mz, base_peak_intensity, low_mz, high_mz) =
         summarize_arrays(&scan.spectrum.mz, &scan.spectrum.intensity);
 
-    let (ms_level, precursor, filter) = match mode {
+    let (ms_level, precursor, projection) = match mode {
         TqQ3MzmlMode::NativeMs2 => {
             let target_mz = (scan.set_mass_da.is_finite() && scan.set_mass_da > 0.0)
                 .then_some(scan.set_mass_da as f64);
@@ -153,21 +160,20 @@ fn record_from_scan(
                 analyzer: Some(msc::Analyzer::TQMS),
                 ..Default::default()
             });
-            (
-                2,
-                precursor,
-                Some("Waters TQ broad Q3 scan (native MS2 semantics)".to_owned()),
-            )
+            (2, precursor, "native-ms2-q3")
         }
-        TqQ3MzmlMode::PseudoMs1 => (
-            1,
-            None,
-            Some("OpenWRaw pseudo-MS1 projection of Waters TQ broad Q3 scan".to_owned()),
-        ),
+        TqQ3MzmlMode::PseudoMs1 => (1, None, "pseudo-ms1-from-q3"),
     };
 
+    let mut extra = BTreeMap::new();
+    extra.insert("openwraw.projection".to_owned(), projection.to_owned());
+    extra.insert(
+        "openwraw.source_acquisition".to_owned(),
+        "Waters TQ broad Q3 scan".to_owned(),
+    );
+
     msc::SpectrumRecord {
-        extra: ::std::collections::BTreeMap::new(),
+        extra,
         acquisition_event_id: None,
         index: (scan_counter as usize).saturating_sub(1),
         scan_number: scan_counter,
@@ -176,7 +182,7 @@ fn record_from_scan(
         polarity: polarity_for(scan.polarity),
         scan_mode: Some(msc::ScanMode::Profile),
         analyzer: Some(msc::Analyzer::TQMS),
-        filter,
+        filter: None,
         retention_time_sec: scan.retention_time_min as f64 * 60.0,
         total_ion_current: Some(tic),
         base_peak_mz,
@@ -244,26 +250,26 @@ impl msc::SpectrumSource for TqQ3Source {
     }
 }
 
-/// Write broad Q3 scans to mzML using the selected semantic projection.
+/// Write broad Q3 scans to PSI-corrected mzML using the selected projection.
 pub fn write_tq_q3_mzml<P: AsRef<Path>, W: Write>(
     dir: P,
     out: &mut W,
     mode: TqQ3MzmlMode,
 ) -> crate::Result<()> {
+    let dir = dir.as_ref();
     let mut source = TqQ3Source::open(dir, mode)?;
-    msc::write_mzml(&mut source, out).map_err(crate::Error::Io)?;
-    Ok(())
+    write_tq_psi_mzml(&mut source, dir, out)
 }
 
-/// Indexed-mzML equivalent of [`write_tq_q3_mzml`].
+/// Indexed-mzML equivalent of [`write_tq_q3_mzml`], rebuilt after PSI fixes.
 pub fn write_tq_q3_indexed_mzml<P: AsRef<Path>, W: Write>(
     dir: P,
     out: &mut W,
     mode: TqQ3MzmlMode,
 ) -> crate::Result<()> {
+    let dir = dir.as_ref();
     let mut source = TqQ3Source::open(dir, mode)?;
-    msc::write_indexed_mzml(&mut source, out).map_err(crate::Error::Io)?;
-    Ok(())
+    write_tq_psi_indexed_mzml(&mut source, dir, out)
 }
 
 #[cfg(test)]
@@ -307,15 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_mode_is_explicit_ms1_without_precursor() {
+    fn pseudo_mode_uses_user_param_provenance_not_filter_string() {
         let record = record_from_scan(TqQ3MzmlMode::PseudoMs1, 1, synthetic_scan());
         assert_eq!(record.ms_level, 1);
         assert!(record.precursor.is_none());
-        assert!(record
-            .filter
-            .as_deref()
-            .unwrap_or_default()
-            .contains("pseudo-MS1"));
+        assert!(record.filter.is_none());
+        assert_eq!(
+            record.extra.get("openwraw.projection").map(String::as_str),
+            Some("pseudo-ms1-from-q3")
+        );
     }
 
     #[test]
