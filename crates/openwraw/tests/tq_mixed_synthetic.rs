@@ -194,6 +194,9 @@ fn mixed_mzml_applies_psi_semantic_corrections() {
     assert!(!xml.contains("name=\"filter string\""));
     assert!(xml.contains("name=\"openwraw.projection\" value=\"pseudo-ms1-from-q3\""));
     assert!(xml.contains(
+        "name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\""
+    ));
+    assert!(xml.contains(
         "name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\""
     ));
     assert!(xml.contains(
@@ -209,6 +212,7 @@ fn mixed_mzml_applies_psi_semantic_corrections() {
         .0;
     assert!(file_content.contains("MS:1000579"));
     assert!(!file_content.contains("MS:1000580"));
+    assert!(file_content.contains("MS:1001473"));
 
     assert!(xml.contains("<instrumentConfigurationList count=\"1\">"));
     assert!(xml.contains("<componentList count=\"4\">"));
