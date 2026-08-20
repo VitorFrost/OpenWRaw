@@ -185,17 +185,37 @@ impl TqReader {
         })
     }
 
-    /// Iterate all Q3 scans in function order, then scan order.
+    /// Iterate all Q3 scans in acquisition order across functions.
+    ///
+    /// MassLynx stores each function in a separate `_FUNCnnn.*` stream even
+    /// when functions were interleaved during acquisition. Ordering only by
+    /// function would therefore turn a polarity-switching run into separate
+    /// full-duration blocks. Retention time reconstructs the acquisition
+    /// chronology while native IDs still retain the original function/scan.
     pub fn iter_scans(&self) -> impl Iterator<Item = crate::Result<TqDecodedQ3Scan>> + '_ {
-        let plan: Vec<(u32, usize)> = self
+        let mut plan: Vec<(f32, u32, usize)> = self
             .q3_functions
             .iter()
             .flat_map(|function| {
-                (0..function.scan_count()).map(move |scan| (function.index, scan))
+                function
+                    .scan_index
+                    .iter()
+                    .enumerate()
+                    .map(move |(scan, record)| {
+                        (record.retention_time_min, function.index, scan)
+                    })
             })
             .collect();
+
+        plan.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+
         plan.into_iter()
-            .map(move |(function, scan)| self.decode_scan(function, scan))
+            .map(move |(_, function, scan)| self.decode_scan(function, scan))
     }
 }
 
