@@ -107,6 +107,7 @@ impl TqReader {
                             "TQ reader: Q3 function {index} uses {bytes_per_pair}-byte records; expected direct 6-byte low-resolution encoding"
                         )));
                     }
+                    validate_q3_layout(index, &scan_index, bytes_per_pair, dat_size)?;
 
                     let calibration = header
                         .cal_functions
@@ -198,6 +199,42 @@ impl TqReader {
     }
 }
 
+/// Validate all static IDX -> DAT relationships while opening the bundle.
+///
+/// `decode_direct6` cannot fail for a correctly-sized six-byte range, so this
+/// catches deterministic truncation/overlap before `SpectrumSource` advertises
+/// its spectrum count. Runtime I/O failure or a file being modified after open
+/// remains a separate environmental error.
+fn validate_q3_layout(
+    function_index: u32,
+    scan_index: &[TqIndexRecord],
+    bytes_per_pair: usize,
+    dat_size: u64,
+) -> crate::Result<()> {
+    for (scan_number, record) in scan_index.iter().enumerate() {
+        if !record.retention_time_min.is_finite() || record.retention_time_min < 0.0 {
+            return Err(crate::Error::Parse(format!(
+                "TQ reader: function {function_index} scan {} has invalid retention time {}",
+                scan_number + 1,
+                record.retention_time_min
+            )));
+        }
+
+        let range = scan_byte_range(scan_index, scan_number, bytes_per_pair, dat_size)?;
+        if let Some(next) = scan_index.get(scan_number + 1) {
+            let next_offset = next.dat_offset as usize;
+            if next_offset < range.end {
+                return Err(crate::Error::Parse(format!(
+                    "TQ reader: function {function_index} scan {} overlaps the next DAT range (end {}, next offset {next_offset})",
+                    scan_number + 1,
+                    range.end
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn read_range(path: &Path, offset: u64, length: usize) -> crate::Result<Vec<u8>> {
     let mut file = fs::File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
@@ -279,6 +316,25 @@ $$ Cal Function 1: 0.0,1.0,T0\r\n";
         assert_eq!(scan.spectrum.intensity, vec![10.0, 20.0]);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_overlapping_q3_scan_ranges() {
+        let index = vec![
+            TqIndexRecord {
+                dat_offset: 0,
+                packed: 2,
+                pair_count: 2,
+                retention_time_min: 0.0,
+            },
+            TqIndexRecord {
+                dat_offset: 6,
+                packed: 2,
+                pair_count: 2,
+                retention_time_min: 0.1,
+            },
+        ];
+        assert!(validate_q3_layout(1, &index, 6, 18).is_err());
     }
 
     #[test]
