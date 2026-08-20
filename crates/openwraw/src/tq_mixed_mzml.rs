@@ -18,6 +18,7 @@ use openmassspec_core::SpectrumSource;
 use crate::raw::tq_mrm::{TqMrmChromatogram, TqMrmReader};
 use crate::tq_mrm_spectra::{pseudo_ms2_records, TqMrmSpectrumMode};
 use crate::tq_mzml::{TqQ3MzmlMode, TqQ3Source};
+use crate::tq_psi_mzml::{write_tq_psi_indexed_mzml, write_tq_psi_mzml};
 
 fn mrm_record(index: usize, trace: TqMrmChromatogram) -> msc::ChromatogramRecord {
     msc::ChromatogramRecord {
@@ -43,26 +44,14 @@ pub struct TqMixedSource {
     q3: TqQ3Source,
     mrm_traces: Vec<TqMrmChromatogram>,
     mrm_spectrum_mode: TqMrmSpectrumMode,
-    /// Precomputed only when the optional pseudo-MS2 compatibility projection
-    /// is requested. Keeping it here makes conversion errors fail `open`
-    /// instead of being silently discarded during iteration, and gives the
-    /// mzML writer an exact `spectrumList` count.
     mrm_spectra: Vec<msc::SpectrumRecord>,
 }
 
 impl TqMixedSource {
-    /// Open both broad-Q3 and canonical MRM views of the same MassLynx bundle.
-    ///
-    /// This default does not add MRM-derived spectra; MRM remains solely in
-    /// canonical SRM chromatograms.
     pub fn open<P: AsRef<Path>>(dir: P, q3_mode: TqQ3MzmlMode) -> crate::Result<Self> {
         Self::open_with_mrm_spectra(dir, q3_mode, TqMrmSpectrumMode::None)
     }
 
-    /// Open the mixed source with an explicit optional MRM spectrum projection.
-    ///
-    /// [`TqMrmSpectrumMode::PseudoMs2`] adds sparse pseudo-MS2 spectra grouped
-    /// by Q1 while still retaining the canonical SRM chromatograms.
     pub fn open_with_mrm_spectra<P: AsRef<Path>>(
         dir: P,
         q3_mode: TqQ3MzmlMode,
@@ -74,7 +63,6 @@ impl TqMixedSource {
         let mrm_traces = mrm.chromatograms()?;
         let mut mrm_spectra = match mrm_spectrum_mode {
             TqMrmSpectrumMode::None => Vec::new(),
-            // Indices are reassigned after chronological merging with Q3 scans.
             TqMrmSpectrumMode::PseudoMs2 => pseudo_ms2_records(&mrm, 0)?,
         };
         mrm_spectra.sort_by(|left, right| {
@@ -118,10 +106,6 @@ impl SpectrumSource for TqMixedSource {
             return self.q3.iter_spectra();
         }
 
-        // Clone the optional compatibility stream before borrowing `q3` for
-        // the lifetime of its iterator. This keeps the two field borrows
-        // unambiguous for the Rust borrow checker and makes the merge logic
-        // independent of field evaluation order.
         let mrm_records = self.mrm_spectra.clone();
         let mut q3 = self.q3.iter_spectra().peekable();
         let mut mrm = mrm_records.into_iter().peekable();
@@ -168,9 +152,7 @@ impl SpectrumSource for TqMixedSource {
     }
 }
 
-/// Write a mixed TQ acquisition to mzML using canonical MRM chromatograms only.
-///
-/// Q3 semantics are controlled explicitly by `q3_mode`.
+/// Write a mixed TQ acquisition to PSI-corrected mzML using canonical MRM chromatograms only.
 pub fn write_tq_mixed_mzml<P: AsRef<Path>, W: Write>(
     dir: P,
     out: &mut W,
@@ -186,9 +168,9 @@ pub fn write_tq_mixed_mzml_with_options<P: AsRef<Path>, W: Write>(
     q3_mode: TqQ3MzmlMode,
     mrm_spectrum_mode: TqMrmSpectrumMode,
 ) -> crate::Result<()> {
+    let dir = dir.as_ref();
     let mut source = TqMixedSource::open_with_mrm_spectra(dir, q3_mode, mrm_spectrum_mode)?;
-    msc::write_mzml(&mut source, out).map_err(crate::Error::Io)?;
-    Ok(())
+    write_tq_psi_mzml(&mut source, dir, out)
 }
 
 /// Indexed-mzML equivalent of [`write_tq_mixed_mzml`].
@@ -207,9 +189,9 @@ pub fn write_tq_mixed_indexed_mzml_with_options<P: AsRef<Path>, W: Write>(
     q3_mode: TqQ3MzmlMode,
     mrm_spectrum_mode: TqMrmSpectrumMode,
 ) -> crate::Result<()> {
+    let dir = dir.as_ref();
     let mut source = TqMixedSource::open_with_mrm_spectra(dir, q3_mode, mrm_spectrum_mode)?;
-    msc::write_indexed_mzml(&mut source, out).map_err(crate::Error::Io)?;
-    Ok(())
+    write_tq_psi_indexed_mzml(&mut source, dir, out)
 }
 
 #[cfg(test)]
