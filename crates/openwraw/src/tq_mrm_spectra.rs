@@ -154,11 +154,14 @@ fn function_pseudo_ms2(
                 acquisition_event_id: None,
                 index,
                 scan_number: (index + 1) as u32,
+                // Keep the declared Waters nativeID token structure. The
+                // process number is used only to distinguish synthetic Q1
+                // groups from the same physical acquisition cycle.
                 native_id: format!(
-                    "function={} process=0 scan={} mrmGroup={}",
+                    "function={} process={} scan={}",
                     function.index,
-                    cycle_index + 1,
-                    group_index + 1
+                    group_index + 1,
+                    cycle_index + 1
                 ),
                 ms_level: 2,
                 polarity: polarity_for(function.descriptor.polarity),
