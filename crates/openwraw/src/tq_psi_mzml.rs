@@ -171,6 +171,10 @@ fn apply_psi_corrections(
         "name=\"highest observed m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"",
     );
     xml = xml.replace(
+        "<cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\"/>",
+        "<cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\"/>",
+    );
+    xml = xml.replace(
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/>",
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>",
     );
@@ -533,6 +537,7 @@ mod tests {
             "<instrumentConfiguration id=\"IC1\">\n    </instrumentConfiguration>\n",
             "<spectrumList><spectrum><cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>",
             "<cvParam cvRef=\"MS\" accession=\"MS:1000504\" name=\"base peak m/z\" value=\"100\"/>",
+            "<binaryDataArray><cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\"/></binaryDataArray>",
             "<binaryDataArray><cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/></binaryDataArray>",
             "</spectrum></spectrumList>"
         );
@@ -540,8 +545,12 @@ mod tests {
         let header = fixed.split("<spectrumList").next().unwrap();
         assert!(header.contains("MS:1000579"));
         assert!(!header.contains("MS:1000580"));
-        assert!(fixed.contains("unitAccession=\"MS:1000040\""));
-        assert!(fixed.contains("unitAccession=\"MS:1000131\""));
+        assert!(fixed.contains(
+            "name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\""
+        ));
+        assert!(fixed.contains(
+            "name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\""
+        ));
         assert!(fixed.contains("MS:1000569"));
         assert!(fixed.contains("<componentList count=\"4\">"));
         assert_eq!(fixed.matches("name=\"quadrupole\"").count(), 2);
