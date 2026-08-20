@@ -3,11 +3,11 @@
 //! `openmassspec-core` 1.5.0 provides the generic mzML serializer used by the
 //! established OpenWRaw readers. The TQ path needs a few stricter semantics
 //! that are not yet expressible through that public API (dynamic fileContent,
-//! a source-bundle checksum, generic/unknown dissociation, corrected units,
-//! and independent observed-vs-declared Q3 mass ranges).
-//! Rather than changing legacy output, TQ conversion serializes plain mzML to
-//! memory, applies deterministic PSI corrections, and (when requested) builds
-//! a fresh indexed-mzML wrapper from the corrected bytes.
+//! a source-bundle checksum, generic/unknown dissociation, instrument
+//! components, corrected units, and independent observed-vs-declared Q3 mass
+//! ranges). Rather than changing legacy output, TQ conversion serializes plain
+//! mzML to memory, applies deterministic PSI corrections, and (when requested)
+//! builds a fresh indexed-mzML wrapper from the corrected bytes.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -30,11 +30,6 @@ pub fn write_tq_psi_mzml<S: msc::SpectrumSource + ?Sized, P: AsRef<Path>, W: Wri
 }
 
 /// Serialize a TQ source as PSI-corrected indexed mzML.
-///
-/// Offsets are calculated only after semantic corrections have been applied.
-/// The indexed wrapper checksum follows the mzML indexed schema definition:
-/// SHA-1 from the beginning of the file through the end of the opening
-/// `<fileChecksum>` tag.
 pub fn write_tq_psi_indexed_mzml<
     S: msc::SpectrumSource + ?Sized,
     P: AsRef<Path>,
@@ -68,8 +63,6 @@ fn apply_psi_corrections(
     source_sha1: &str,
     scan_windows: &BTreeMap<String, (f64, f64)>,
 ) -> crate::Result<String> {
-    // fileContent must describe what is actually present in spectrumList,
-    // rather than unconditionally advertising both MS1 and MSn.
     let spectrum_body = xml
         .split_once("<spectrumList")
         .map(|(_, body)| body)
@@ -99,9 +92,6 @@ fn apply_psi_corrections(
     }
     xml = xml.replacen(old_file_content, &new_file_content, 1);
 
-    // Waters RAW is a directory bundle. The checksum convention is made
-    // explicit so the SHA-1 is reproducible and not confused with a vendor
-    // definition for hashing a directory object.
     let source_close = "      </sourceFile>";
     let source_insert = format!(
         concat!(
@@ -119,10 +109,36 @@ fn apply_psi_corrections(
     }
     xml = xml.replacen(source_close, &source_insert, 1);
 
-    // An MS2 precursor activation group must carry the dissociation-method
-    // parent term or one of its children. When TQ method metadata has not yet
-    // identified a specific mechanism, use the generic parent rather than
-    // inventing CID.
+    // The generic core serializer does not currently expose source/analyzer/
+    // detector components in the PSI componentList hierarchy. TQ export uses
+    // conservative parent terms where the native parser has not decoded a
+    // more specific component. Two quadrupoles represent the Q1 and Q3 mass
+    // filters; the collision cell is not claimed as a mass analyzer.
+    let instrument_close = "    </instrumentConfiguration>";
+    let instrument_components = concat!(
+        "      <componentList count=\"4\">\n",
+        "        <source order=\"1\">\n",
+        "          <cvParam cvRef=\"MS\" accession=\"MS:1000008\" name=\"ionization type\" value=\"\"/>\n",
+        "        </source>\n",
+        "        <analyzer order=\"2\">\n",
+        "          <cvParam cvRef=\"MS\" accession=\"MS:1000081\" name=\"quadrupole\" value=\"\"/>\n",
+        "        </analyzer>\n",
+        "        <analyzer order=\"3\">\n",
+        "          <cvParam cvRef=\"MS\" accession=\"MS:1000081\" name=\"quadrupole\" value=\"\"/>\n",
+        "        </analyzer>\n",
+        "        <detector order=\"4\">\n",
+        "          <cvParam cvRef=\"MS\" accession=\"MS:1000026\" name=\"detector type\" value=\"\"/>\n",
+        "        </detector>\n",
+        "      </componentList>\n",
+        "    </instrumentConfiguration>"
+    );
+    if !xml.contains(instrument_close) {
+        return Err(crate::Error::Parse(
+            "TQ mzML PSI correction: instrumentConfiguration closing element not found".to_owned(),
+        ));
+    }
+    xml = xml.replacen(instrument_close, instrument_components, 1);
+
     xml = xml.replace(
         "            <activation>\n            </activation>",
         concat!(
@@ -131,16 +147,11 @@ fn apply_psi_corrections(
             "            </activation>"
         ),
     );
-
-    // openmassspec-core 1.5.0 hardcodes CID on SRM chromatograms. Until .EE
-    // method metadata is exposed, downgrade that assertion to the generic
-    // dissociation-method term.
     xml = xml.replace(
         "<cvParam cvRef=\"MS\" accession=\"MS:1000133\" name=\"collision-induced dissociation\" value=\"\"/>",
         "<cvParam cvRef=\"MS\" accession=\"MS:1000044\" name=\"dissociation method\" value=\"\"/>",
     );
 
-    // PSI units for spectrum-level mass/intensity attributes.
     xml = xml.replace(
         "name=\"base peak m/z\" value=\"",
         "name=\"base peak m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"",
@@ -157,19 +168,12 @@ fn apply_psi_corrections(
         "name=\"highest observed m/z\" value=\"",
         "name=\"highest observed m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\" unitName=\"m/z\" value=\"",
     );
-
-    // Intensity arrays (spectra and chromatograms) should identify their unit.
     xml = xml.replace(
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/>",
         "<cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\" unitName=\"number of detector counts\"/>",
     );
 
-    // The generic serializer uses lowest/highest *observed* m/z as the scan
-    // window. Q3 descriptors carry the programmed acquisition bounds
-    // separately, so repair only scanWindow while leaving observed terms
-    // untouched.
     apply_scan_window_overrides(&mut xml, scan_windows)?;
-
     Ok(xml)
 }
 
@@ -203,9 +207,6 @@ fn apply_scan_window_overrides(
     for (native_id, &(low, high)) in scan_windows {
         let marker = format!("<spectrum id=\"{native_id}\"");
         let Some(start) = xml.find(&marker) else {
-            // A source adapter is allowed to omit an undecodable spectrum.
-            // Its static RAW descriptor may therefore have no emitted XML
-            // counterpart; this is not an error.
             continue;
         };
         let relative_end = xml[start..].find("</spectrum>").ok_or_else(|| {
@@ -527,6 +528,7 @@ mod tests {
             "      <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n",
             "</fileContent>\n",
             "<sourceFile>\n      </sourceFile>\n",
+            "<instrumentConfiguration id=\"IC1\">\n    </instrumentConfiguration>\n",
             "<spectrumList><spectrum><cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>",
             "<cvParam cvRef=\"MS\" accession=\"MS:1000504\" name=\"base peak m/z\" value=\"100\"/>",
             "<binaryDataArray><cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/></binaryDataArray>",
@@ -539,6 +541,10 @@ mod tests {
         assert!(fixed.contains("unitAccession=\"MS:1000040\""));
         assert!(fixed.contains("unitAccession=\"MS:1000131\""));
         assert!(fixed.contains("MS:1000569"));
+        assert!(fixed.contains("<componentList count=\"4\">"));
+        assert_eq!(fixed.matches("name=\"quadrupole\"").count(), 2);
+        assert!(fixed.contains("name=\"ionization type\""));
+        assert!(fixed.contains("name=\"detector type\""));
     }
 
     #[test]
