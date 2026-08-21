@@ -77,7 +77,10 @@ impl TqMrmReader {
         }
 
         let mut functions = Vec::new();
-        for (zero_based, record) in function_bytes.chunks_exact(FUNCTION_RECORD_SIZE).enumerate() {
+        for (zero_based, record) in function_bytes
+            .chunks_exact(FUNCTION_RECORD_SIZE)
+            .enumerate()
+        {
             let index = (zero_based + 1) as u32;
             let descriptor = TqFunctionDescriptor::from_record(record)?;
             if descriptor.kind != TqFunctionKind::Mrm {
