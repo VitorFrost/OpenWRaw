@@ -4,6 +4,12 @@
 
 OpenWRaw can represent mixed Waters triple-quadrupole acquisitions containing broad Q3 scans and MRM functions without requiring Waters SDK libraries.
 
+## Validation status
+
+The broad-Q3 direct-6 decoder has been exercised against a complete non-public TQ Q3 function in addition to the repository's synthetic tests. Without publishing any private fixture data, the validation confirmed exact IDX-to-DAT coverage, successful decoding of every scan, monotonic m/z ordering, and agreement between decoded intensity sums and the TIC values stored in IDX at relative error on the order of `10^-6`.
+
+This establishes strong internal validation of the Q3 binary layout and intensity decoding for the observed TQ family. The remaining analytical validation item is an independent point-for-point comparison of calibrated m/z values against a vendor-generated or ProteoWizard reference export. TQ support therefore remains **experimental**, especially outside the observed instrument/function families.
+
 ## Data model
 
 The TQ path keeps the two acquisition families distinct:
@@ -223,3 +229,5 @@ The current MRM transition model also assumes the active Q1/Q3 descriptor entrie
 Specific ion-source and detector component types are not yet decoded from the TQ RAW path, so the mzML component list uses PSI parent terms for those two components while representing Q1 and Q3 explicitly as quadrupoles.
 
 The legacy QTOF/IMS `Reader::open` path is intentionally unchanged. TQ support currently uses the dedicated TQ readers and conversion functions documented above.
+
+For broad Q3 scans, binary structure and intensity reconstruction have been validated on a complete private function. Absolute calibrated m/z equivalence to vendor/reference output is still pending, and MRM behavior still needs broader confirmation across additional independent TQ acquisitions, including scheduled or sparse-channel methods.
