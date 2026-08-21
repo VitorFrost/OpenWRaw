@@ -104,10 +104,7 @@ fn sorted_group_arrays(
         })
         .collect();
 
-    pairs.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     pairs.into_iter().unzip()
 }
 
@@ -254,8 +251,7 @@ mod tests {
 
     #[test]
     fn summarize_sparse_transition_spectrum() {
-        let (tic, bp_mz, bp_int, low, high) =
-            summarize(&[100.0, 150.0, 175.0], &[2.0, 9.0, 4.0]);
+        let (tic, bp_mz, bp_int, low, high) = summarize(&[100.0, 150.0, 175.0], &[2.0, 9.0, 4.0]);
         assert_eq!(tic, 15.0);
         assert_eq!(bp_mz, Some(150.0));
         assert_eq!(bp_int, Some(9.0));
