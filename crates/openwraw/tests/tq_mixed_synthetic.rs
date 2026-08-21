@@ -2,9 +2,7 @@ use openmassspec_core::SpectrumSource;
 use openwraw::raw::tq::{TqPolarity, FUNCTION_RECORD_SIZE};
 use openwraw::raw::tq_mrm::TqMrmReader;
 use openwraw::raw::tq_reader::TqReader;
-use openwraw::tq_mixed_mzml::{
-    write_tq_mixed_indexed_mzml, write_tq_mixed_mzml, TqMixedSource,
-};
+use openwraw::tq_mixed_mzml::{write_tq_mixed_indexed_mzml, write_tq_mixed_mzml, TqMixedSource};
 use openwraw::tq_mrm_spectra::TqMrmSpectrumMode;
 use openwraw::tq_mzml::TqQ3MzmlMode;
 use std::fs;
@@ -32,9 +30,7 @@ fn direct6_record(
     intensity_base: i16,
     intensity_power: u32,
 ) -> [u8; 6] {
-    let packed = (mass_base << 9)
-        | ((mass_power_field & 0x1f) << 4)
-        | (intensity_power & 0x0f);
+    let packed = (mass_base << 9) | ((mass_power_field & 0x1f) << 4) | (intensity_power & 0x0f);
     let mut record = [0_u8; 6];
     record[0..2].copy_from_slice(&intensity_base.to_le_bytes());
     record[2..6].copy_from_slice(&packed.to_le_bytes());
@@ -125,7 +121,10 @@ fn mixed_source_emits_q3_spectrum_and_srm_chromatograms() {
     let spectra: Vec<_> = source.iter_spectra().collect();
     assert_eq!(spectra.len(), 1);
     assert_eq!(spectra[0].ms_level, 1);
-    assert_eq!(spectra[0].polarity, Some(openmassspec_core::Polarity::Negative));
+    assert_eq!(
+        spectra[0].polarity,
+        Some(openmassspec_core::Polarity::Negative)
+    );
     assert!(spectra[0].filter.is_none());
     assert_eq!(
         spectra[0]
@@ -168,7 +167,10 @@ fn mixed_pseudo_spectra_follow_acquisition_time_order() {
     assert_eq!(spectra[2].retention_time_sec, 30.0);
     assert_eq!(spectra[2].ms_level, 2);
     assert_eq!(
-        spectra.iter().map(|record| record.index).collect::<Vec<_>>(),
+        spectra
+            .iter()
+            .map(|record| record.index)
+            .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
 
@@ -193,15 +195,13 @@ fn mixed_mzml_applies_psi_semantic_corrections() {
     assert!(!xml.contains("name=\"collision-induced dissociation\""));
     assert!(!xml.contains("name=\"filter string\""));
     assert!(xml.contains("name=\"openwraw.projection\" value=\"pseudo-ms1-from-q3\""));
-    assert!(xml.contains(
-        "name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\""
-    ));
+    assert!(
+        xml.contains("name=\"m/z array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\"")
+    );
     assert!(xml.contains(
         "name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\""
     ));
-    assert!(xml.contains(
-        "name=\"base peak m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\""
-    ));
+    assert!(xml.contains("name=\"base peak m/z\" unitCvRef=\"MS\" unitAccession=\"MS:1000040\""));
 
     let file_content = xml
         .split_once("<fileContent>")
