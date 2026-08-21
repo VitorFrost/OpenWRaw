@@ -89,11 +89,7 @@ fn pseudo_ms2_groups_by_q1_sorts_q3_and_preserves_signal_pairing() {
 
     assert!(spectra.iter().all(|s| {
         s.filter.is_none()
-            && s
-                .extra
-                .get("openwraw.projection")
-                .map(String::as_str)
-                == Some("pseudo-ms2-from-mrm")
+            && s.extra.get("openwraw.projection").map(String::as_str) == Some("pseudo-ms2-from-mrm")
     }));
 
     let _ = fs::remove_dir_all(&dir);
