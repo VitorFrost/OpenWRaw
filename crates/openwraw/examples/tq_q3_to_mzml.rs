@@ -18,9 +18,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::time::Instant;
 
-use openwraw::tq_mzml::{
-    write_tq_q3_indexed_mzml, write_tq_q3_mzml, TqQ3MzmlMode,
-};
+use openwraw::tq_mzml::{write_tq_q3_indexed_mzml, write_tq_q3_mzml, TqQ3MzmlMode};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
