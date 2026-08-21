@@ -82,7 +82,10 @@ impl TqReader {
         let mut mrm_function_count = 0_usize;
         let mut unknown_function_count = 0_usize;
 
-        for (zero_based, record) in function_bytes.chunks_exact(FUNCTION_RECORD_SIZE).enumerate() {
+        for (zero_based, record) in function_bytes
+            .chunks_exact(FUNCTION_RECORD_SIZE)
+            .enumerate()
+        {
             let index = (zero_based + 1) as u32;
             let descriptor = TqFunctionDescriptor::from_record(record)?;
             match descriptor.kind {
@@ -201,9 +204,7 @@ impl TqReader {
                     .scan_index
                     .iter()
                     .enumerate()
-                    .map(move |(scan, record)| {
-                        (record.retention_time_min, function.index, scan)
-                    })
+                    .map(move |(scan, record)| (record.retention_time_min, function.index, scan))
             })
             .collect();
 
