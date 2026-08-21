@@ -189,8 +189,17 @@ fn mixed_mzml_applies_psi_semantic_corrections() {
     assert!(xml.contains("<spectrumList"));
     assert!(xml.contains("<chromatogramList"));
     assert!(xml.contains("selected reaction monitoring chromatogram"));
-    assert!(xml.contains("accession=\"MS:1000569\" name=\"SHA-1\""));
-    assert!(xml.contains("OpenWRaw Waters RAW bundle checksum convention"));
+    assert_eq!(
+        xml.matches("accession=\"MS:1000569\" name=\"SHA-1\"")
+            .count(),
+        6
+    );
+    assert_eq!(xml.matches("name=\"Waters nativeID format\"").count(), 2);
+    assert_eq!(xml.matches("name=\"Waters raw format\"").count(), 2);
+    assert_eq!(xml.matches("name=\"no nativeID format\"").count(), 4);
+    assert!(xml.contains("<sourceFileList count=\"6\">"));
+    assert!(xml.contains("defaultSourceFileRef=\"_FUNC001.DAT\""));
+    assert!(!xml.contains("OpenWRaw Waters RAW bundle checksum convention"));
     assert!(xml.contains("name=\"dissociation method\""));
     assert!(!xml.contains("name=\"collision-induced dissociation\""));
     assert!(!xml.contains("name=\"filter string\""));

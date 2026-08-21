@@ -3,7 +3,7 @@
 //! `openmassspec-core` 1.5.0 provides the generic mzML serializer used by the
 //! established OpenWRaw readers. The TQ path needs a few stricter semantics
 //! that are not yet expressible through that public API (dynamic fileContent,
-//! a source-bundle checksum, generic/unknown dissociation, instrument
+//! per-file Waters source provenance, generic/unknown dissociation, instrument
 //! components, corrected units, and independent observed-vs-declared Q3 mass
 //! ranges). Rather than changing legacy output, TQ conversion serializes plain
 //! mzML to memory, applies deterministic PSI corrections, and (when requested)
@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 use openmassspec_core as msc;
 
 use crate::raw::tq_reader::TqReader;
+
+#[derive(Debug)]
+struct SourceProvenance {
+    source_file_list_xml: String,
+    default_source_file_ref: String,
+}
 
 pub fn write_tq_psi_mzml<S: msc::SpectrumSource + ?Sized, P: AsRef<Path>, W: Write>(
     source: &mut S,
@@ -48,14 +54,14 @@ fn corrected_plain_mzml<S: msc::SpectrumSource + ?Sized>(
     let xml = String::from_utf8(raw).map_err(|err| {
         crate::Error::Parse(format!("TQ mzML writer emitted non-UTF-8 XML: {err}"))
     })?;
-    let source_sha1 = deterministic_bundle_sha1(source_dir)?;
+    let provenance = source_file_provenance(source_dir)?;
     let scan_windows = q3_scan_windows(source_dir)?;
-    apply_psi_corrections(xml, &source_sha1, &scan_windows)
+    apply_psi_corrections(xml, &provenance, &scan_windows)
 }
 
 fn apply_psi_corrections(
     mut xml: String,
-    source_sha1: &str,
+    provenance: &SourceProvenance,
     scan_windows: &BTreeMap<String, (f64, f64)>,
 ) -> crate::Result<String> {
     let spectrum_body = xml
@@ -96,22 +102,36 @@ fn apply_psi_corrections(
     }
     xml = xml.replacen(old_file_content, &new_file_content, 1);
 
-    let source_close = "      </sourceFile>";
-    let source_insert = format!(
-        concat!(
-            "        <cvParam cvRef=\"MS\" accession=\"MS:1000569\" name=\"SHA-1\" value=\"{}\"/>\n",
-            "        <userParam name=\"OpenWRaw Waters RAW bundle checksum convention\" ",
-            "value=\"SHA-1 over sorted relative-path length/path, file-size, and file bytes; mzML outputs excluded\"/>\n",
-            "{}"
-        ),
-        source_sha1, source_close
+    let source_list_start = xml.find("    <sourceFileList").ok_or_else(|| {
+        crate::Error::Parse(
+            "TQ mzML PSI correction: sourceFileList opening element not found".to_owned(),
+        )
+    })?;
+    let source_list_close = "    </sourceFileList>";
+    let source_list_tail = xml[source_list_start..]
+        .find(source_list_close)
+        .ok_or_else(|| {
+            crate::Error::Parse(
+                "TQ mzML PSI correction: sourceFileList closing element not found".to_owned(),
+            )
+        })?;
+    let source_list_end = source_list_start + source_list_tail + source_list_close.len();
+    xml.replace_range(
+        source_list_start..source_list_end,
+        &provenance.source_file_list_xml,
     );
-    if !xml.contains(source_close) {
+
+    let old_source_ref = "defaultSourceFileRef=\"sf1\"";
+    if !xml.contains(old_source_ref) {
         return Err(crate::Error::Parse(
-            "TQ mzML PSI correction: sourceFile closing element not found".to_owned(),
+            "TQ mzML PSI correction: defaultSourceFileRef=sf1 was not found".to_owned(),
         ));
     }
-    xml = xml.replacen(source_close, &source_insert, 1);
+    let new_source_ref = format!(
+        "defaultSourceFileRef=\"{}\"",
+        xml_escape_attr(&provenance.default_source_file_ref)
+    );
+    xml = xml.replacen(old_source_ref, &new_source_ref, 1);
 
     let instrument_close = "    </instrumentConfiguration>";
     let instrument_components = concat!(
@@ -352,31 +372,119 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn deterministic_bundle_sha1(dir: &Path) -> crate::Result<String> {
+fn source_file_provenance(dir: &Path) -> crate::Result<SourceProvenance> {
     let mut files = Vec::new();
     collect_source_files(dir, dir, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let mut sha = Sha1::new();
-    for (relative, path) in files {
-        let rel = relative.as_bytes();
-        sha.update(&(rel.len() as u64).to_le_bytes());
-        sha.update(rel);
+    if files.is_empty() {
+        return Err(crate::Error::Parse(
+            "TQ source provenance: no source files found".to_owned(),
+        ));
+    }
 
-        let size = fs::metadata(&path)?.len();
-        sha.update(&size.to_le_bytes());
+    let mut source_file_list_xml = format!("    <sourceFileList count=\"{}\">\n", files.len());
+    let mut default_source_file_ref = None;
 
-        let mut file = fs::File::open(path)?;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            sha.update(&buffer[..read]);
+    for (index, (relative, path)) in files.iter().enumerate() {
+        let id = source_file_id(relative, index);
+        let checksum = file_sha1(path)?;
+        let is_function_dat = is_waters_function_dat(relative);
+
+        if default_source_file_ref.is_none() && is_function_dat {
+            default_source_file_ref = Some(id.clone());
         }
+
+        source_file_list_xml.push_str(&format!(
+            "      <sourceFile id=\"{}\" name=\"{}\" location=\"\">\n",
+            id,
+            xml_escape_attr(relative)
+        ));
+        if is_function_dat {
+            source_file_list_xml.push_str(
+                "        <cvParam cvRef=\"MS\" accession=\"MS:1000769\" name=\"Waters nativeID format\" value=\"\"/>\n",
+            );
+            source_file_list_xml.push_str(
+                "        <cvParam cvRef=\"MS\" accession=\"MS:1000526\" name=\"Waters raw format\" value=\"\"/>\n",
+            );
+        } else {
+            source_file_list_xml.push_str(
+                "        <cvParam cvRef=\"MS\" accession=\"MS:1000824\" name=\"no nativeID format\" value=\"\"/>\n",
+            );
+        }
+        source_file_list_xml.push_str(&format!(
+            "        <cvParam cvRef=\"MS\" accession=\"MS:1000569\" name=\"SHA-1\" value=\"{}\"/>\n",
+            checksum
+        ));
+        source_file_list_xml.push_str("      </sourceFile>\n");
+    }
+    source_file_list_xml.push_str("    </sourceFileList>");
+
+    let default_source_file_ref = default_source_file_ref.unwrap_or_else(|| "sf1".to_owned());
+    Ok(SourceProvenance {
+        source_file_list_xml,
+        default_source_file_ref,
+    })
+}
+
+fn source_file_id(relative: &str, index: usize) -> String {
+    let mut chars = relative.chars();
+    let Some(first) = chars.next() else {
+        return format!("sf{}", index + 1);
+    };
+    let first_ok = first.is_ascii_alphabetic() || first == '_';
+    let rest_ok = chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    if first_ok && rest_ok {
+        relative.to_owned()
+    } else {
+        format!("sf{}", index + 1)
+    }
+}
+
+fn file_sha1(path: &Path) -> crate::Result<String> {
+    let mut sha = Sha1::new();
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        sha.update(&buffer[..read]);
     }
     Ok(hex_digest(&sha.finalize()))
+}
+
+fn is_waters_function_dat(relative: &str) -> bool {
+    let Some(name) = Path::new(relative)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let upper = name.to_ascii_uppercase();
+    let Some(number) = upper
+        .strip_prefix("_FUNC")
+        .and_then(|tail| tail.strip_suffix(".DAT"))
+    else {
+        return false;
+    };
+    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn xml_escape_attr(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn collect_source_files(
@@ -524,6 +632,22 @@ impl Sha1 {
 mod tests {
     use super::*;
 
+    fn test_provenance() -> SourceProvenance {
+        SourceProvenance {
+            source_file_list_xml: concat!(
+                "    <sourceFileList count=\"1\">\n",
+                "      <sourceFile id=\"sf1\" name=\"_FUNC001.DAT\" location=\"\">\n",
+                "        <cvParam cvRef=\"MS\" accession=\"MS:1000769\" name=\"Waters nativeID format\" value=\"\"/>\n",
+                "        <cvParam cvRef=\"MS\" accession=\"MS:1000526\" name=\"Waters raw format\" value=\"\"/>\n",
+                "        <cvParam cvRef=\"MS\" accession=\"MS:1000569\" name=\"SHA-1\" value=\"deadbeef\"/>\n",
+                "      </sourceFile>\n",
+                "    </sourceFileList>"
+            )
+            .to_owned(),
+            default_source_file_ref: "sf1".to_owned(),
+        }
+    }
+
     #[test]
     fn sha1_matches_known_vector() {
         assert_eq!(
@@ -533,21 +657,78 @@ mod tests {
     }
 
     #[test]
+    fn source_provenance_uses_per_file_sha1_and_waters_terms() {
+        let dir = std::env::temp_dir().join(format!(
+            "openwraw-tq-source-provenance-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("_FUNC001.DAT"), b"abc").unwrap();
+        fs::write(dir.join("_FUNC001.IDX"), b"idx").unwrap();
+        fs::write(dir.join("_HEADER.TXT"), b"header").unwrap();
+        fs::write(dir.join("generated.mzML"), b"not-source").unwrap();
+
+        let provenance = source_file_provenance(&dir).unwrap();
+        assert!(provenance.source_file_list_xml.contains("count=\"3\""));
+        assert_eq!(
+            provenance
+                .source_file_list_xml
+                .matches("name=\"Waters nativeID format\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            provenance
+                .source_file_list_xml
+                .matches("name=\"Waters raw format\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            provenance
+                .source_file_list_xml
+                .matches("name=\"no nativeID format\"")
+                .count(),
+            2
+        );
+        assert_eq!(
+            provenance
+                .source_file_list_xml
+                .matches("name=\"SHA-1\"")
+                .count(),
+            3
+        );
+        assert!(provenance
+            .source_file_list_xml
+            .contains("value=\"a9993e364706816aba3e25717850c26c9cd0d89d\""));
+        assert!(!provenance.source_file_list_xml.contains("generated.mzML"));
+        assert_eq!(provenance.default_source_file_ref, "_FUNC001.DAT");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn corrections_make_file_content_dynamic_and_add_units() {
         let xml = concat!(
             "<fileContent>\n",
             "      <cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>\n",
             "      <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n",
             "</fileContent>\n",
-            "<sourceFile>\n      </sourceFile>\n",
+            "    <sourceFileList count=\"1\">\n",
+            "      <sourceFile id=\"sf1\" name=\"bundle.raw\" location=\"\">\n",
+            "      </sourceFile>\n",
+            "    </sourceFileList>\n",
             "<instrumentConfiguration id=\"IC1\">\n    </instrumentConfiguration>\n",
+            "<run defaultSourceFileRef=\"sf1\">",
             "<spectrumList><spectrum><cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>",
             "<cvParam cvRef=\"MS\" accession=\"MS:1000504\" name=\"base peak m/z\" value=\"100\"/>",
             "<binaryDataArray><cvParam cvRef=\"MS\" accession=\"MS:1000514\" name=\"m/z array\" value=\"\"/></binaryDataArray>",
             "<binaryDataArray><cvParam cvRef=\"MS\" accession=\"MS:1000515\" name=\"intensity array\" value=\"\"/></binaryDataArray>",
             "</spectrum></spectrumList>"
         );
-        let fixed = apply_psi_corrections(xml.to_owned(), "deadbeef", &BTreeMap::new()).unwrap();
+        let fixed =
+            apply_psi_corrections(xml.to_owned(), &test_provenance(), &BTreeMap::new()).unwrap();
         let header = fixed.split("<spectrumList").next().unwrap();
         assert!(header.contains("MS:1000579"));
         assert!(!header.contains("MS:1000580"));
@@ -558,6 +739,8 @@ mod tests {
             "name=\"intensity array\" value=\"\" unitCvRef=\"MS\" unitAccession=\"MS:1000131\""
         ));
         assert!(fixed.contains("MS:1000569"));
+        assert!(fixed.contains("name=\"_FUNC001.DAT\""));
+        assert!(!fixed.contains("Waters RAW bundle checksum convention"));
         assert!(fixed.contains("<componentList count=\"4\">"));
         assert_eq!(fixed.matches("name=\"quadrupole\"").count(), 2);
         assert!(fixed.contains("name=\"ionization type\""));
@@ -571,12 +754,17 @@ mod tests {
             "      <cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>\n",
             "      <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n",
             "</fileContent>\n",
-            "<sourceFile>\n      </sourceFile>\n",
+            "    <sourceFileList count=\"1\">\n",
+            "      <sourceFile id=\"sf1\" name=\"bundle.raw\" location=\"\">\n",
+            "      </sourceFile>\n",
+            "    </sourceFileList>\n",
             "<instrumentConfiguration id=\"IC1\">\n    </instrumentConfiguration>\n",
+            "<run defaultSourceFileRef=\"sf1\">",
             "<spectrumList></spectrumList>",
             "<chromatogramList><chromatogram><cvParam accession=\"MS:1001473\" name=\"selected reaction monitoring chromatogram\"/></chromatogram></chromatogramList>"
         );
-        let fixed = apply_psi_corrections(xml.to_owned(), "deadbeef", &BTreeMap::new()).unwrap();
+        let fixed =
+            apply_psi_corrections(xml.to_owned(), &test_provenance(), &BTreeMap::new()).unwrap();
         let content = fixed
             .split_once("<fileContent>")
             .unwrap()
