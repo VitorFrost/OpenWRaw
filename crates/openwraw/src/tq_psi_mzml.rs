@@ -28,11 +28,7 @@ pub fn write_tq_psi_mzml<S: msc::SpectrumSource + ?Sized, P: AsRef<Path>, W: Wri
     Ok(())
 }
 
-pub fn write_tq_psi_indexed_mzml<
-    S: msc::SpectrumSource + ?Sized,
-    P: AsRef<Path>,
-    W: Write,
->(
+pub fn write_tq_psi_indexed_mzml<S: msc::SpectrumSource + ?Sized, P: AsRef<Path>, W: Write>(
     source: &mut S,
     source_dir: P,
     out: &mut W,
@@ -49,8 +45,9 @@ fn corrected_plain_mzml<S: msc::SpectrumSource + ?Sized>(
 ) -> crate::Result<String> {
     let mut raw = Vec::new();
     msc::write_mzml(source, &mut raw).map_err(crate::Error::Io)?;
-    let xml = String::from_utf8(raw)
-        .map_err(|err| crate::Error::Parse(format!("TQ mzML writer emitted non-UTF-8 XML: {err}")))?;
+    let xml = String::from_utf8(raw).map_err(|err| {
+        crate::Error::Parse(format!("TQ mzML writer emitted non-UTF-8 XML: {err}"))
+    })?;
     let source_sha1 = deterministic_bundle_sha1(source_dir)?;
     let scan_windows = q3_scan_windows(source_dir)?;
     apply_psi_corrections(xml, &source_sha1, &scan_windows)
@@ -321,9 +318,12 @@ fn collect_element_offsets(
             .iter()
             .position(|&byte| byte == b'>')
             .map(|pos| offset + pos)
-            .ok_or_else(|| crate::Error::Parse("TQ indexed mzML: unterminated element".to_owned()))?;
-        let tag = std::str::from_utf8(&bytes[offset..=end])
-            .map_err(|err| crate::Error::Parse(format!("TQ indexed mzML: invalid UTF-8 tag: {err}")))?;
+            .ok_or_else(|| {
+                crate::Error::Parse("TQ indexed mzML: unterminated element".to_owned())
+            })?;
+        let tag = std::str::from_utf8(&bytes[offset..=end]).map_err(|err| {
+            crate::Error::Parse(format!("TQ indexed mzML: invalid UTF-8 tag: {err}"))
+        })?;
         let id = extract_attribute(tag, attribute).ok_or_else(|| {
             crate::Error::Parse(format!(
                 "TQ indexed mzML: element at byte {offset} lacks {attribute} attribute"
@@ -347,7 +347,9 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn deterministic_bundle_sha1(dir: &Path) -> crate::Result<String> {
@@ -427,7 +429,13 @@ struct Sha1 {
 impl Sha1 {
     fn new() -> Self {
         Self {
-            state: [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476, 0xc3d2_e1f0],
+            state: [
+                0x6745_2301,
+                0xefcd_ab89,
+                0x98ba_dcfe,
+                0x1032_5476,
+                0xc3d2_e1f0,
+            ],
             count: 0,
             buffer: [0; 64],
             buffer_len: 0,
@@ -463,11 +471,9 @@ impl Sha1 {
             ]);
         }
         for index in 16..80 {
-            words[index] = (words[index - 3]
-                ^ words[index - 8]
-                ^ words[index - 14]
-                ^ words[index - 16])
-                .rotate_left(1);
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e] = self.state;
@@ -596,10 +602,7 @@ mod tests {
         )
         .to_owned();
         let mut windows = BTreeMap::new();
-        windows.insert(
-            "function=2 process=0 scan=1".to_owned(),
-            (75.0, 900.0),
-        );
+        windows.insert("function=2 process=0 scan=1".to_owned(), (75.0, 900.0));
         apply_scan_window_overrides(&mut xml, &windows).unwrap();
         assert!(xml.contains("lowest observed m/z\" value=\"100.000000\""));
         assert!(xml.contains("highest observed m/z\" value=\"200.000000\""));
@@ -617,7 +620,8 @@ mod tests {
         );
         let indexed = build_indexed_mzml(plain).unwrap();
         let text = String::from_utf8(indexed.clone()).unwrap();
-        let index_offset_start = text.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
+        let index_offset_start =
+            text.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
         let index_offset_end = text[index_offset_start..].find('<').unwrap() + index_offset_start;
         let index_offset: usize = text[index_offset_start..index_offset_end].parse().unwrap();
         assert!(text[index_offset..].starts_with("<indexList"));
