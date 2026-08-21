@@ -1,6 +1,6 @@
 # Triple-quadrupole / low-resolution MassLynx variants
 
-## Status: Partially decoded, privately validated
+## Status: Q3 direct-6 validated on private TQ data; broader TQ support remains experimental
 
 This note documents format-level behavior observed in a non-public Waters triple-quadrupole MassLynx RAW dataset and cross-checked against public implementations where possible.
 
@@ -20,6 +20,19 @@ The validated RAW bundle uses the classic MassLynx directory layout:
 - optional per-function files such as `_FUNCnnn.STS`, `.EE`, and `.CMP`
 
 The acquisition contains both targeted MRM functions and broad MS2/Q3 scan functions. This is a useful compatibility case because the current OpenWRaw corpus is dominated by TOF/QTOF and IMS-TOF instruments.
+
+### Private Q3 validation result
+
+The 6-byte broad-Q3 path has now been exercised end-to-end against a complete non-public TQ Q3 function, without committing any source-derived fixture data. The validation used only format invariants and aggregate numerical checks:
+
+- every IDX scan range resolved inside the paired DAT file;
+- the scan ranges covered the DAT payload exactly, with no gaps, overlaps, or trailing bytes;
+- every scan decoded successfully through `TqReader`;
+- decoded m/z values were monotonically ordered within every scan;
+- the sum of decoded point intensities reproduced the per-scan TIC stored in IDX to relative error on the order of `10^-6`;
+- the per-function calibration polynomial from `_HEADER.TXT` was applied in the direct mass domain by the reader.
+
+These checks strongly validate the 22-byte IDX interpretation, 22-bit pair-count mask, 6-byte direct packed representation, intensity decoder, and scan slicing logic for this TQ family. Absolute calibrated m/z accuracy has **not yet** been independently compared point-for-point against a vendor-generated or ProteoWizard reference export, so that remains a separate validation step.
 
 ## `_FUNCTNS.INF`
 
@@ -79,7 +92,7 @@ The low 22 bits of the packed field are used as the pair/value count in public W
 pair_count = packed & 0x003F_FFFF
 ```
 
-OpenWRaw currently masks only the low 16 bits for Variant A. Expanding this mask is recommended before supporting additional low-resolution files.
+The dedicated TQ parser uses the full 22-bit count field. The established TOF Variant-A path is kept separate so its legacy behavior is not changed solely from observations in the TQ family.
 
 ### Do not infer DAT encoding from IDX stride alone
 
@@ -135,7 +148,7 @@ cycle 2: I(transition 1), I(transition 2), ...
 
 The transition m/z values must not be reconstructed from DAT because they are not stored there.
 
-For canonical mzML, MRM data should preferably be exported as SRM chromatograms rather than fabricated full spectra. A compatibility option analogous to `srmAsSpectra` may be added separately.
+OpenWRaw exports this data canonically as SRM chromatograms rather than fabricating native full spectra. An optional additive pseudo-MS2 projection is available for spectrum-oriented compatibility workflows while preserving the SRM chromatograms as the authoritative representation.
 
 ## 6-byte direct low-resolution scan encoding
 
@@ -159,38 +172,19 @@ intensity = base_value × 4^(value_power)
 
 Per-function calibration from `_HEADER.TXT` may then be applied to the decoded m/z values.
 
-This should be implemented as a separate encoding variant, for example `LowResPacked6`, rather than modifying the existing TOF `Encoding A`.
+The TQ path implements this as a separate direct-6 decoder (`decode_direct6`) rather than modifying the existing TOF `Encoding A`.
 
 ## `_extern.inf` implications
 
-Current OpenWRaw requires TOF geometry fields such as `Lteff`, `Veff`, and a pusher interval during `Reader::open()`.
+The established QTOF/IMS `Reader::open()` path requires TOF geometry fields such as `Lteff`, `Veff`, and a pusher interval. Those fields are not intrinsic requirements of MassLynx RAW and are not required to decode the direct low-resolution TQ format described above.
 
-Those fields are not intrinsic requirements of MassLynx RAW and are not required to decode the direct low-resolution TQ format described above.
-
-Recommended model:
-
-```text
-ExternInf
-└── optional TOF geometry
-    ├── Lteff
-    ├── Veff
-    └── pusher interval
-```
-
-TOF decoders should require the geometry only when the selected DAT encoding actually needs it.
+The experimental TQ implementation therefore uses a dedicated `TqReader` that does not require `_extern.inf` TOF geometry. This avoids weakening or changing the validated TOF reader while TQ support is still being generalized. A future shared reader model may make analyzer-specific geometry optional and require it only in decoders that actually use TOF coordinates.
 
 ### Polarity is per function
 
 Mixed-polarity triple-quadrupole methods may contain both positive and negative functions in the same RAW bundle. A single run-level polarity is therefore insufficient.
 
-Recommended change:
-
-```text
-ExternFunction
-└── polarity: Option<Polarity>
-```
-
-The mzML exporter should resolve polarity using the current function index.
+The TQ function descriptor therefore stores polarity per function, and the TQ mzML exporter resolves polarity from the current function rather than from a single run-level value. This behavior is scoped to the observed TQ function codes and is not assumed to be universal across Waters families.
 
 ## mzML semantics
 
@@ -210,18 +204,24 @@ Export as an MS2 spectrum with:
 
 For downstream tools that require MS1-like survey data, an **explicit opt-in transformation** may relabel broad Q3/MS2 scans as pseudo-MS1. This must be recorded as a computational reinterpretation, not presented as native MS1 acquisition.
 
-## Recommended implementation changes
+## Implementation status
 
-1. Add TQ function-kind decoding based on `function_type`.
-2. Treat TOF geometry in `_extern.inf` as optional.
-3. Expand the Variant-A/22-byte pair-count mask to 22 bits.
-4. Detect DAT width using function type plus DAT/IDX consistency, not IDX stride alone.
-5. Add a `LowResPacked6` decoder for direct m/z/intensity records.
-6. Add a 4-byte MRM intensity decoder.
-7. Parse Q1 and Q3 transition arrays from `_FUNCTNS.INF`.
-8. Store polarity per function.
-9. Export MRM as chromatograms and broad Q3 scans as native MS2 by default.
-10. Add an explicit pseudo-MS1 compatibility mode only when requested.
+The experimental TQ branch now implements the core items originally identified during format analysis:
+
+- TQ function-kind decoding from observed `function_type` values;
+- a dedicated `TqReader` path that does not require TOF flight-path geometry;
+- the 22-bit IDX pair-count mask;
+- DAT record-width inference from IDX/DAT consistency;
+- a 6-byte direct low-resolution m/z/intensity decoder for broad Q3 scans;
+- a 4-byte packed-intensity decoder for MRM cycles;
+- Q1/Q3 transition arrays from `_FUNCTNS.INF`;
+- per-function TQ polarity;
+- native MS2 export for broad Q3 scans;
+- canonical SRM chromatogram export for MRM;
+- explicit pseudo-MS1 projection for broad Q3 scans;
+- optional additive pseudo-MS2 projection for MRM compatibility workflows.
+
+The established QTOF/IMS `Reader` remains unchanged while this TQ path is validated across additional independent datasets. Generalizing the common reader architecture can be considered after the format families are better covered by corpus data.
 
 ## Testing and confidentiality policy
 
@@ -247,6 +247,7 @@ The following should remain marked as provisional until confirmed across additio
 - the complete enumeration of TQ `function_type` values;
 - exact semantics of every non-zero `_FUNCTNS.INF` field for MRM and broad scan functions;
 - whether the function-level Set Mass in broad Q3 scans always corresponds to a meaningful Q1 setting or may sometimes be acquisition-software bookkeeping;
+- independent point-for-point confirmation of the calibrated Q3 m/z axis against a vendor-generated or ProteoWizard reference export;
 - full `.EE` and `.CMP` generalization across instrument generations.
 
 The parser should therefore preserve unknown raw fields where practical and avoid over-generalizing from a single instrument family.
