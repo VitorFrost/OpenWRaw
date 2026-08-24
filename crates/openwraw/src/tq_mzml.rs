@@ -232,10 +232,15 @@ impl msc::SpectrumSource for TqQ3Source {
         let reader = &self.reader;
         let mode = self.mode;
         let mut emitted_count = 0_u32;
-        Box::new(reader.iter_scans().filter_map(move |decoded| {
-            let scan = decoded.ok()?;
+        Box::new(reader.iter_scans().map(move |decoded| {
+            let scan = match decoded {
+                Ok(scan) => scan,
+                Err(error) => panic!(
+                    "TQ Q3 spectrum iteration failed after bundle validation: {error}"
+                ),
+            };
             emitted_count += 1;
-            Some(record_from_scan(mode, emitted_count, scan))
+            record_from_scan(mode, emitted_count, scan)
         }))
     }
 
