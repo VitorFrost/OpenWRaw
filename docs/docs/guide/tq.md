@@ -12,6 +12,8 @@ The direct packed m/z equation was also compared against Rainbow's independent p
 
 The MRM DAT4 path has now been structurally checked across the private acquisition's positive- and negative-polarity MRM functions and different transition counts. IDX cycle geometry and DAT length close exactly. A repeatable encoding-specific relationship was also found: decoded DAT4 intensity sums are approximately twice the IDX `+0x08` statistic. The same 2:1 relationship occurs in Rainbow's public Waters TQ fixture, so OpenWRaw deliberately does **not** introduce a factor-of-two correction merely to make DAT4 agree with that IDX field. Absolute DAT4 intensity scale still requires vendor-reference confirmation.
 
+The complete private mixed TQ bundle has also been exercised through the mixed source and PSI mzML writers in native-MS2, pseudo-MS1, and additive MRM pseudo-MS2 modes. The broad-Q3 binary payload is unchanged when the MRM compatibility projection is enabled, acquisition-time ordering remains monotonic, canonical SRM chromatograms remain present, and both plain and indexed outputs pass the bundled PSI mzML schemas. Indexed output has additionally been checked for spectrum/chromatogram offsets and file-checksum consistency. These validation statements intentionally omit run-specific counts and acquisition details.
+
 TQ support therefore remains **experimental**, especially outside the observed instrument/function families.
 
 ## Data model
@@ -86,12 +88,13 @@ The TQ conversion path applies an additional PSI-oriented serialization pass aft
 The correction layer currently ensures that:
 
 - `fileContent` advertises only MS1/MSn spectrum types actually emitted;
-- the Waters source bundle carries a reproducible SHA-1 checksum and an explicit description of the OpenWRaw bundle-hash convention;
+- Waters source files are represented individually with per-file SHA-1 provenance while the actual private source names remain separate from generated mzML identifiers;
 - an unknown MS2/SRM dissociation mechanism is represented by the generic PSI `MS:1000044` `dissociation method` term rather than an empty activation or invented CID assertion;
 - projection provenance is carried in `userParam` values instead of `MS:1000512 filter string`;
 - intensity arrays and spectrum-level mass/intensity summary values carry appropriate PSI units;
 - the instrument configuration contains a PSI `componentList` with a conservative ionization source, Q1 quadrupole, Q3 quadrupole, and detector. Generic parent terms are used for source/detector type until more specific native metadata is decoded;
 - Q3 `lowest/highest observed m/z` remain based on the decoded spectrum, while `scanWindow` uses the programmed lower/upper acquisition bounds from `_FUNCTNS.INF`;
+- the mzML `run` identifier is normalized to a conservative XML `xs:ID`-safe value when a RAW directory name starts with a number or contains unsupported punctuation, without changing the reconstructed source-file provenance;
 - indexed mzML offsets are calculated only after these semantic corrections, and `fileChecksum` is recomputed over the corrected indexed document according to the indexed-mzML checksum convention.
 
 The TQ serializer is tied to the exact `openmassspec-core` version in `Cargo.lock`; its string-level corrections must be reviewed whenever that dependency's mzML writer changes.
@@ -220,11 +223,13 @@ Repository tests for this path must use either:
 
 Private data may be used locally to verify that a generic decoder behaves correctly, but tests and documentation committed to the repository must not contain sample identifiers, private method details, real transition lists, chromatographic results, internal paths, serial numbers, or byte sequences copied from a closed run.
 
-**Generated mzML from a confidential RAW is itself confidential.** It contains source-derived spectral/chromatographic data and identifies the source bundle by name and a reproducible SHA-1 fingerprint. Do not publish a converted private mzML merely because the OpenWRaw source code and synthetic tests are safe to publish.
+**Generated mzML from a confidential RAW is itself confidential.** It contains source-derived spectral/chromatographic data plus per-file source provenance and cryptographic checksums. Do not publish a converted private mzML merely because the OpenWRaw source code and synthetic tests are safe to publish.
 
 ## Current limitations
 
 The mixed converter currently focuses on the information required for structurally and semantically defensible Q3 spectra and MRM chromatograms. Additional Waters side-file metadata such as compound labels and per-transition method parameters can be exposed later once their API and mzML representation are defined cleanly.
+
+`openmassspec-core` 1.5 exposes an infallible `SpectrumSource` iterator. OpenWRaw validates static Q3 IDX/DAT layout before iteration and deliberately fails fast if a Q3 DAT read later becomes impossible (for example because the source files are removed or modified during conversion), rather than silently omitting a spectrum. A future fallible iterator in the core API would allow this environmental failure to be returned as a normal `Result` instead of a hard failure.
 
 MRM functions are currently required to have a constant non-zero transition count across their populated acquisition cycles. Zero-point cycles are skipped. Scheduled/dynamic MRM functions that change the active transition count within one function are rejected rather than guessed, because the current format model does not yet establish an unambiguous per-cycle mapping from the changing DAT channel set back to the 32 Q1/Q3 descriptor slots.
 
