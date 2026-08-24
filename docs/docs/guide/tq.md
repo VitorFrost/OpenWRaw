@@ -6,9 +6,13 @@ OpenWRaw can represent mixed Waters triple-quadrupole acquisitions containing br
 
 ## Validation status
 
-The broad-Q3 direct-6 decoder has been exercised against a complete non-public TQ Q3 function in addition to the repository's synthetic tests. Without publishing any private fixture data, the validation confirmed exact IDX-to-DAT coverage, successful decoding of every scan, monotonic m/z ordering, and agreement between decoded intensity sums and the TIC values stored in IDX at relative error on the order of `10^-6`.
+The broad-Q3 direct-6 decoder has been exercised against a complete non-public TQ Q3 function in addition to the repository's synthetic tests. Without publishing any private fixture data, the validation confirmed exact IDX-to-DAT coverage, successful decoding of every scan, monotonic m/z ordering, and agreement between decoded intensity sums and the IDX `+0x08` scan-signal statistic at relative error on the order of `10^-6`.
 
-This establishes strong internal validation of the Q3 binary layout and intensity decoding for the observed TQ family. The remaining analytical validation item is an independent point-for-point comparison of calibrated m/z values against a vendor-generated or ProteoWizard reference export. TQ support therefore remains **experimental**, especially outside the observed instrument/function families.
+The direct packed m/z equation was also compared against Rainbow's independent public Waters implementation. The uncalibrated m/z values agreed point-for-point; after calibration, the remaining difference was below `2.3e-4` Da (`0.22` ppm) and is explained by Rainbow's `float32` arithmetic versus OpenWRaw's `f64` polynomial evaluation. Vendor/ProteoWizard point-for-point confirmation of the calibrated m/z axis is still pending.
+
+The MRM DAT4 path has now been structurally checked across the private acquisition's positive- and negative-polarity MRM functions and different transition counts. IDX cycle geometry and DAT length close exactly. A repeatable encoding-specific relationship was also found: decoded DAT4 intensity sums are approximately twice the IDX `+0x08` statistic. The same 2:1 relationship occurs in Rainbow's public Waters TQ fixture, so OpenWRaw deliberately does **not** introduce a factor-of-two correction merely to make DAT4 agree with that IDX field. Absolute DAT4 intensity scale still requires vendor-reference confirmation.
+
+TQ support therefore remains **experimental**, especially outside the observed instrument/function families.
 
 ## Data model
 
@@ -226,8 +230,8 @@ MRM functions are currently required to have a constant non-zero transition coun
 
 The current MRM transition model also assumes the active Q1/Q3 descriptor entries occupy the leading transition slots. This is validated for the format family used to develop the reader but has not yet been generalized to sparse/non-contiguous descriptor-slot schedules.
 
+DAT4 absolute signal scaling has not yet been compared against a Waters SDK / MassLynx / ProteoWizard reference. The observed 2:1 relationship between decoded DAT4 sums and IDX `+0x08` is reproducible across both the private TQ dataset and a public Rainbow TQ fixture, but `+0x08` itself does not have a universal TIC scale across MassLynx encodings and is not used to rescale MRM output.
+
 Specific ion-source and detector component types are not yet decoded from the TQ RAW path, so the mzML component list uses PSI parent terms for those two components while representing Q1 and Q3 explicitly as quadrupoles.
 
 The legacy QTOF/IMS `Reader::open` path is intentionally unchanged. TQ support currently uses the dedicated TQ readers and conversion functions documented above.
-
-For broad Q3 scans, binary structure and intensity reconstruction have been validated on a complete private function. Absolute calibrated m/z equivalence to vendor/reference output is still pending, and MRM behavior still needs broader confirmation across additional independent TQ acquisitions, including scheduled or sparse-channel methods.
