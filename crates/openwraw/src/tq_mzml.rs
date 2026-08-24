@@ -81,6 +81,21 @@ fn bundle_name(reader: &TqReader) -> String {
         .unwrap_or_else(|| "bundle.raw".to_owned())
 }
 
+fn mzml_run_id_for(source_name: &str) -> String {
+    let mut id = String::from("run_");
+    for ch in source_name.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            id.push(ch);
+        } else {
+            id.push('_');
+        }
+    }
+    if id == "run_" {
+        id.push_str("waters_tq");
+    }
+    id
+}
+
 fn run_metadata_for(reader: &TqReader) -> msc::RunMetadata {
     let instrument_name = reader
         .header
@@ -203,11 +218,20 @@ fn record_from_scan(
 pub struct TqQ3Source {
     reader: TqReader,
     mode: TqQ3MzmlMode,
+    use_mzml_safe_run_id: bool,
 }
 
 impl TqQ3Source {
     pub fn new(reader: TqReader, mode: TqQ3MzmlMode) -> Self {
-        Self { reader, mode }
+        Self {
+            reader,
+            mode,
+            use_mzml_safe_run_id: false,
+        }
+    }
+
+    pub(crate) fn prepare_for_mzml(&mut self) {
+        self.use_mzml_safe_run_id = true;
     }
 
     pub fn open<P: AsRef<Path>>(dir: P, mode: TqQ3MzmlMode) -> crate::Result<Self> {
@@ -225,7 +249,15 @@ impl TqQ3Source {
 
 impl msc::SpectrumSource for TqQ3Source {
     fn run_metadata(&self) -> msc::RunMetadata {
-        run_metadata_for(&self.reader)
+        let mut metadata = run_metadata_for(&self.reader);
+        if self.use_mzml_safe_run_id {
+            // openmassspec-core 1.5 uses source_file_name for both the
+            // sourceFile name and the XML xs:ID-valued run id. TQ PSI
+            // serialization later rebuilds sourceFileList from the RAW
+            // bundle, so only the transient writer metadata needs a safe ID.
+            metadata.source_file_name = mzml_run_id_for(&metadata.source_file_name);
+        }
+        metadata
     }
 
     fn iter_spectra<'s>(&'s mut self) -> Box<dyn Iterator<Item = msc::SpectrumRecord> + 's> {
@@ -263,6 +295,7 @@ pub fn write_tq_q3_mzml<P: AsRef<Path>, W: Write>(
 ) -> crate::Result<()> {
     let dir = dir.as_ref();
     let mut source = TqQ3Source::open(dir, mode)?;
+    source.prepare_for_mzml();
     write_tq_psi_mzml(&mut source, dir, out)
 }
 
@@ -274,6 +307,7 @@ pub fn write_tq_q3_indexed_mzml<P: AsRef<Path>, W: Write>(
 ) -> crate::Result<()> {
     let dir = dir.as_ref();
     let mut source = TqQ3Source::open(dir, mode)?;
+    source.prepare_for_mzml();
     write_tq_psi_indexed_mzml(&mut source, dir, out)
 }
 
@@ -350,5 +384,12 @@ mod tests {
     fn q3_source_mode_enum_is_independent_of_function_kind() {
         assert_eq!(TqFunctionKind::Q3Scan, TqFunctionKind::Q3Scan);
         assert_ne!(TqFunctionKind::Q3Scan, TqFunctionKind::Mrm);
+    }
+
+    #[test]
+    fn mzml_run_id_is_valid_for_numeric_or_punctuated_source_names() {
+        assert_eq!(mzml_run_id_for("20230413_EL-020.raw"), "run_20230413_EL-020.raw");
+        assert_eq!(mzml_run_id_for("a path/bundle.raw"), "run_a_path_bundle.raw");
+        assert_eq!(mzml_run_id_for(""), "run_waters_tq");
     }
 }
