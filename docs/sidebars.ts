@@ -14,6 +14,7 @@ const sidebars: SidebarsConfig = {
         'guide/encodings',
         'guide/ims',
         'guide/chromatograms',
+        'guide/tq',
       ],
     },
     {
@@ -33,6 +34,7 @@ const sidebars: SidebarsConfig = {
         'format/proc-files',
         'format/aux-files',
         'format/apex3d-bin',
+        'format/tq-lowres',
       ],
     },
     'changelog',
