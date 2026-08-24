@@ -94,6 +94,10 @@ impl TqMixedSource {
     pub fn mrm_spectrum_count(&self) -> usize {
         self.mrm_spectra.len()
     }
+
+    fn prepare_for_mzml(&mut self) {
+        self.q3.prepare_for_mzml();
+    }
 }
 
 impl SpectrumSource for TqMixedSource {
@@ -170,6 +174,7 @@ pub fn write_tq_mixed_mzml_with_options<P: AsRef<Path>, W: Write>(
 ) -> crate::Result<()> {
     let dir = dir.as_ref();
     let mut source = TqMixedSource::open_with_mrm_spectra(dir, q3_mode, mrm_spectrum_mode)?;
+    source.prepare_for_mzml();
     write_tq_psi_mzml(&mut source, dir, out)
 }
 
@@ -191,6 +196,7 @@ pub fn write_tq_mixed_indexed_mzml_with_options<P: AsRef<Path>, W: Write>(
 ) -> crate::Result<()> {
     let dir = dir.as_ref();
     let mut source = TqMixedSource::open_with_mrm_spectra(dir, q3_mode, mrm_spectrum_mode)?;
+    source.prepare_for_mzml();
     write_tq_psi_indexed_mzml(&mut source, dir, out)
 }
 
