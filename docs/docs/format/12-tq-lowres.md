@@ -1,6 +1,6 @@
 # Triple-quadrupole / low-resolution MassLynx variants
 
-## Status: Q3 direct-6 validated on private TQ data; broader TQ support remains experimental
+## Status: Q3 direct-6 validated on private TQ data; MRM DAT4 structurally cross-validated; broader TQ support remains experimental
 
 This note documents format-level behavior observed in a non-public Waters triple-quadrupole MassLynx RAW dataset and cross-checked against public implementations where possible.
 
@@ -29,10 +29,16 @@ The 6-byte broad-Q3 path has now been exercised end-to-end against a complete no
 - the scan ranges covered the DAT payload exactly, with no gaps, overlaps, or trailing bytes;
 - every scan decoded successfully through `TqReader`;
 - decoded m/z values were monotonically ordered within every scan;
-- the sum of decoded point intensities reproduced the per-scan TIC stored in IDX to relative error on the order of `10^-6`;
+- the sum of decoded point intensities reproduced the scan-signal statistic stored at IDX `+0x08` to relative error on the order of `10^-6`;
 - the per-function calibration polynomial from `_HEADER.TXT` was applied in the direct mass domain by the reader.
 
-These checks strongly validate the 22-byte IDX interpretation, 22-bit pair-count mask, 6-byte direct packed representation, intensity decoder, and scan slicing logic for this TQ family. Absolute calibrated m/z accuracy has **not yet** been independently compared point-for-point against a vendor-generated or ProteoWizard reference export, so that remains a separate validation step.
+These checks strongly validate the 22-byte IDX interpretation, 22-bit pair-count mask, 6-byte direct packed representation, intensity decoder, and scan slicing logic for this TQ family. The `+0x08` relationship is an empirical invariant for the observed direct-6 Q3 data and must not be generalized as a universal TIC definition for 22-byte IDX records. Absolute calibrated m/z accuracy has **not yet** been independently compared point-for-point against a vendor-generated or ProteoWizard reference export, so that remains a separate validation step.
+
+### Independent direct-6 implementation check
+
+The packed-mass equation and the 22-bit IDX pair-count rule were independently compared against Rainbow's public Waters parser. Across the complete private Q3 function, the uncalibrated packed m/z values were identical point-for-point to the Rainbow equation. Applying the same calibration polynomial differed only by numerical precision: Rainbow accumulates its calibrated axis in `float32`, whereas OpenWRaw evaluates the polynomial in `f64`. The largest observed difference was below `2.3e-4` Da (below `0.22` ppm).
+
+This is independent implementation agreement, not a substitute for a vendor-reference export.
 
 ## `_FUNCTNS.INF`
 
@@ -150,6 +156,21 @@ The transition m/z values must not be reconstructed from DAT because they are no
 
 OpenWRaw exports this data canonically as SRM chromatograms rather than fabricating native full spectra. An optional additive pseudo-MS2 projection is available for spectrum-oriented compatibility workflows while preserving the SRM chromatograms as the authoritative representation.
 
+### MRM DAT4 validation status
+
+The 4-byte path has been checked across all MRM functions in the private mixed-polarity TQ acquisition. The functions covered both polarities and different active transition counts. For every tested function:
+
+- the IDX pair count was constant within the function and matched the active leading Q1/Q3 descriptor slots;
+- `cycle_count × transition_count × 4` matched the DAT size exactly;
+- every IDX-derived DAT range was in bounds, with no overlaps or trailing bytes;
+- decoding with the public DAT4 equation produced finite non-negative signal values.
+
+An additional invariant was observed at IDX `+0x08`: for every tested MRM cycle, the sum of decoded DAT4 transition intensities was approximately **two times** the `f32` value stored at `+0x08`, with relative residuals on the order of `10^-7`. The same 2:1 relationship was independently reproduced on Rainbow's public Waters TQ fixture, which uses the same 4-byte encoding.
+
+This cross-dataset result is important because it shows that IDX `+0x08` is **not a canonical TIC field with one universal scale across low-resolution encodings**. In direct-6 Q3 data it matches the decoded intensity sum, while in the observed DAT4 MRM data it tracks half of that sum. OpenWRaw therefore does **not** rescale DAT4 intensities merely to force equality with IDX `+0x08`.
+
+The absolute intensity scale of DAT4 should remain marked provisional until compared against a vendor SDK / MassLynx / ProteoWizard reference. The current decoder intentionally follows the independently published Rainbow equation rather than introducing an unsupported factor-of-two correction.
+
 ## 6-byte direct low-resolution scan encoding
 
 Broad TQ scan functions also use 6-byte records, but they are **not** the same representation as OpenWRaw's current TOF `Encoding A`.
@@ -248,6 +269,7 @@ The following should remain marked as provisional until confirmed across additio
 - exact semantics of every non-zero `_FUNCTNS.INF` field for MRM and broad scan functions;
 - whether the function-level Set Mass in broad Q3 scans always corresponds to a meaningful Q1 setting or may sometimes be acquisition-software bookkeeping;
 - independent point-for-point confirmation of the calibrated Q3 m/z axis against a vendor-generated or ProteoWizard reference export;
+- absolute DAT4 MRM intensity-scale confirmation against a vendor-generated or ProteoWizard reference export;
 - full `.EE` and `.CMP` generalization across instrument generations.
 
 The parser should therefore preserve unknown raw fields where practical and avoid over-generalizing from a single instrument family.
