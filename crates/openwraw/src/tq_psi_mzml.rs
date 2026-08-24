@@ -227,22 +227,57 @@ fn apply_scan_window_overrides(
     xml: &mut String,
     scan_windows: &BTreeMap<String, (f64, f64)>,
 ) -> crate::Result<()> {
-    for (native_id, &(low, high)) in scan_windows {
-        let marker = format!("<spectrum id=\"{native_id}\"");
-        let Some(start) = xml.find(&marker) else {
-            continue;
-        };
-        let relative_end = xml[start..].find("</spectrum>").ok_or_else(|| {
-            crate::Error::Parse(format!(
-                "TQ mzML PSI correction: unterminated spectrum {native_id}"
-            ))
-        })?;
-        let end = start + relative_end + "</spectrum>".len();
-        let mut spectrum = xml[start..end].to_owned();
-        spectrum = replace_cv_value(&spectrum, "MS:1000501", low)?;
-        spectrum = replace_cv_value(&spectrum, "MS:1000500", high)?;
-        xml.replace_range(start..end, &spectrum);
+    if scan_windows.is_empty() {
+        return Ok(());
     }
+
+    // Walk the serialized spectrum list once. Re-starting `find()` from the
+    // beginning and mutating the full mzML String for every Q3 scan makes the
+    // correction effectively quadratic on large broad-scan files.
+    let corrected = {
+        let original = xml.as_str();
+        let mut corrected = String::with_capacity(original.len());
+        let mut cursor = 0_usize;
+
+        while let Some(relative_start) = original[cursor..].find("<spectrum ") {
+            let start = cursor + relative_start;
+            corrected.push_str(&original[cursor..start]);
+
+            let relative_end = original[start..].find("</spectrum>").ok_or_else(|| {
+                crate::Error::Parse(
+                    "TQ mzML PSI correction: unterminated spectrum element".to_owned(),
+                )
+            })?;
+            let end = start + relative_end + "</spectrum>".len();
+            let spectrum = &original[start..end];
+
+            let opening_end = spectrum.find('>').ok_or_else(|| {
+                crate::Error::Parse(
+                    "TQ mzML PSI correction: unterminated spectrum opening tag".to_owned(),
+                )
+            })?;
+            let opening_tag = &spectrum[..=opening_end];
+
+            if let Some(native_id) = extract_attribute(opening_tag, "id") {
+                if let Some(&(low, high)) = scan_windows.get(native_id) {
+                    let spectrum = replace_cv_value(spectrum, "MS:1000501", low)?;
+                    let spectrum = replace_cv_value(&spectrum, "MS:1000500", high)?;
+                    corrected.push_str(&spectrum);
+                } else {
+                    corrected.push_str(spectrum);
+                }
+            } else {
+                corrected.push_str(spectrum);
+            }
+
+            cursor = end;
+        }
+
+        corrected.push_str(&original[cursor..]);
+        corrected
+    };
+
+    *xml = corrected;
     Ok(())
 }
 
@@ -796,6 +831,45 @@ mod tests {
         assert!(xml.contains("highest observed m/z\" value=\"200.000000\""));
         assert!(xml.contains("scan window lower limit\" value=\"75.000000\""));
         assert!(xml.contains("scan window upper limit\" value=\"900.000000\""));
+    }
+
+    #[test]
+    fn scan_window_overrides_multiple_spectra_in_one_pass() {
+        let mut xml = concat!(
+            "<before/>",
+            "<spectrum id=\"function=2 process=0 scan=1\">",
+            "<scanWindow>",
+            "<cvParam accession=\"MS:1000501\" value=\"100.000000\"/>",
+            "<cvParam accession=\"MS:1000500\" value=\"200.000000\"/>",
+            "</scanWindow></spectrum>",
+            "<spectrum id=\"function=2 process=0 scan=2\">",
+            "<scanWindow>",
+            "<cvParam accession=\"MS:1000501\" value=\"101.000000\"/>",
+            "<cvParam accession=\"MS:1000500\" value=\"201.000000\"/>",
+            "</scanWindow></spectrum>",
+            "<spectrum id=\"function=9 process=0 scan=1\">",
+            "<scanWindow>",
+            "<cvParam accession=\"MS:1000501\" value=\"300.000000\"/>",
+            "<cvParam accession=\"MS:1000500\" value=\"400.000000\"/>",
+            "</scanWindow></spectrum>",
+            "<after/>"
+        )
+        .to_owned();
+        let mut windows = BTreeMap::new();
+        windows.insert("function=2 process=0 scan=1".to_owned(), (75.0, 900.0));
+        windows.insert("function=2 process=0 scan=2".to_owned(), (80.0, 950.0));
+
+        apply_scan_window_overrides(&mut xml, &windows).unwrap();
+
+        assert!(xml.starts_with("<before/>"));
+        assert!(xml.ends_with("<after/>"));
+        assert!(xml.contains("value=\"75.000000\""));
+        assert!(xml.contains("value=\"900.000000\""));
+        assert!(xml.contains("value=\"80.000000\""));
+        assert!(xml.contains("value=\"950.000000\""));
+        assert!(xml.contains("function=9 process=0 scan=1"));
+        assert!(xml.contains("value=\"300.000000\""));
+        assert!(xml.contains("value=\"400.000000\""));
     }
 
     #[test]
